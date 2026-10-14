@@ -317,7 +317,14 @@ def _url_payload_command(n: int) -> str:
 #: which now say the match is on the statement's text anywhere on the command line
 #: (heredoc bodies included) and name the file-editing tool for prose that mentions
 #: one. Six lines of catalog text: no pattern, matcher or floor change.
-_PACKAGE_LINE_BUDGET = 29_181
+#:
+#: Raised again, from 29,181, for ``exfil.restore_allowed_links``: an allowed host
+#: with several different addresses in one reply pairs its placeholders with its
+#: records by order instead of staying blocked, and every address put back must
+#: read as one whole URL where it lands. Display-time only; no redaction rule,
+#: pattern or threshold moved. Then by 2 for the ``ordered`` gate (older rows keep the
+#: one-address rule) and the check that an address never lands inside another URL.
+_PACKAGE_LINE_BUDGET = 29_196
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
