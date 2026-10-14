@@ -53,7 +53,7 @@ describe('KiroPrerequisiteGate agent picker copy (UX round 5)', () => {
     vi.clearAllMocks()
     localStorage.clear()
     vi.mocked(api.kiroPrerequisite).mockResolvedValue(status())
-    vi.mocked(api.kirocrewConfig).mockResolvedValue({ agent: {} })
+    vi.mocked(api.kirocrewConfig).mockResolvedValue({ agent: { acp_backend: '' } })
     vi.mocked(api.acpBackends).mockResolvedValue({ backends: [] })
   })
 
@@ -198,7 +198,7 @@ describe('KiroPrerequisiteGate agent picker copy (UX round 5)', () => {
       backends: [probe({ installed: 'missing', install_command: 'npm install -g x' })],
     })
     vi.mocked(api.patchConfig).mockImplementation(async () => {
-      vi.mocked(api.kirocrewConfig).mockResolvedValue({ agent: {} })
+      vi.mocked(api.kirocrewConfig).mockResolvedValue({ agent: { acp_backend: '' } })
       return {}
     })
     render()
@@ -281,7 +281,7 @@ describe('KiroPrerequisiteGate shared probe eligibility', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     localStorage.clear()
-    vi.mocked(api.kirocrewConfig).mockResolvedValue({ agent: {} })
+    vi.mocked(api.kirocrewConfig).mockResolvedValue({ agent: { acp_backend: '' } })
     vi.mocked(api.kiroPrerequisite).mockResolvedValue(status())
   })
 

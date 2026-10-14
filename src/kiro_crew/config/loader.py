@@ -1652,13 +1652,30 @@ def unsandboxed_exec_declared() -> bool:
     An unreadable or non-object document contributes nothing: a corrupt config is
     not a declaration.
     """
+    return _agent_key_declared("sandbox_allow_unsandboxed_exec")
+
+
+def acp_backend_declared() -> bool:
+    """Whether either config document names ``agent.acp_backend``, in any value.
+
+    An absent key is "no harness choice" and resolves to the product default, so
+    :meth:`KiroCrewConfig.save` strips the field unless this is true. Read from
+    disk, like :func:`unsandboxed_exec_declared`, so the writer and every reader
+    answer the same question about one host instead of trusting an in-memory flag
+    that a snapshot loaded before a ``config set`` would contradict.
+    """
+    return _agent_key_declared("acp_backend")
+
+
+def _agent_key_declared(key: str) -> bool:
+    """Whether ``config.json`` or the ``config.local.json`` overlay names ``agent.<key>``."""
     for path in (config_path(), config_local_path()):
         try:
             doc = json.loads(read_config_text(path))
         except (OSError, ValueError):
             continue
         agent = doc.get("agent") if isinstance(doc, dict) else None
-        if isinstance(agent, dict) and "sandbox_allow_unsandboxed_exec" in agent:
+        if isinstance(agent, dict) and key in agent:
             return True
     return False
 
@@ -3342,6 +3359,24 @@ def _session_start_concurrency(raw: object, ceiling: int = 64) -> int | str:
     return max(1, min(ceiling, value))
 
 
+def _read_backend_choice(section: _sections.SectionReader, agent_data: dict, key: str) -> str:
+    """Resolve a harness field, keeping an ABSENT key "no choice" at the one gate.
+
+    A present value goes to the gate as stored, so an unusable explicit pick still
+    degrades with its warning (harness-parity H3). An absent key reads the field
+    default, which is not a pick: when the registry does not serve it (a policy
+    denies KAS) the gate gets ``None`` and takes the floor silently, instead of
+    warning on every load about a value nobody wrote. ``validate_config_data``
+    replaces a present non-string with the floor before this runs.
+    """
+    from kiro_crew.acp_backends import selectable_backends
+
+    value = section.get(key)
+    if key not in agent_data and value not in selectable_backends():
+        value = None
+    return _normalize_acp_backend(value)
+
+
 # Build each section in its own frame: the large inline constructor amplifies
 # line-tracing cost on every load. These helpers create fresh values, never
 # cache configuration, and leave resolution and admission checks unchanged.
@@ -3362,8 +3397,8 @@ def _build_agent_config(agent_data: dict) -> AgentConfig:
         provider=section.get("provider"),
         mcp_registry_mode=section.read("mcp_registry_mode", _safe_bool),
         mcp_quarantine_after_failures=section.read("mcp_quarantine_after_failures", _safe_int),
-        acp_backend=_normalize_acp_backend(section.get("acp_backend")),
-        member_acp_backend=_normalize_acp_backend(section.get("member_acp_backend")),
+        acp_backend=_read_backend_choice(section, agent_data, "acp_backend"),
+        member_acp_backend=_read_backend_choice(section, agent_data, "member_acp_backend"),
         default_agent=section.get("default_agent"),
         # Through the module alias rather than a new top-level import: the loader's
         # ``from ... import`` list is a FROZEN pre-split compatibility snapshot
@@ -4607,6 +4642,17 @@ class KiroCrewConfig:
             agent_section = d.get("agent")
             if isinstance(agent_section, dict):
                 agent_section.pop("sandbox_allow_unsandboxed_exec", None)
+        # Same rule for ``agent.acp_backend``: absence is "no harness choice" and
+        # resolves to the product default, so a full-document snapshot must not
+        # freeze today's resolved harness in as a choice the user never made. Only
+        # this disk write strips it; ``to_dict()`` keeps the resolved value for
+        # every reader (``config get``, the dashboard response, the live watcher).
+        # An explicit pick reaches disk through the delta writers
+        # (``config set``, the dashboard PATCH), after which this reads declared.
+        if not acp_backend_declared():
+            agent_section = d.get("agent")
+            if isinstance(agent_section, dict):
+                agent_section.pop("acp_backend", None)
         # Strip overlay-owned values so they don't leak into config.json
         local_path = config_local_path()
         if local_path.is_file():
@@ -5693,6 +5739,11 @@ def build_config(
         # could not read what they configured". Carry the observation
         # through so the caller can tell them apart.
         cfg = config_cls(_degraded_sections=frozenset(_OBSERVED_DEGRADED_SECTIONS))
+        agent_defaults = _sections.SectionReader(AgentConfig, {})
+        cfg.agent.acp_backend = _read_backend_choice(agent_defaults, {}, "acp_backend")
+        cfg.agent.member_acp_backend = _read_backend_choice(
+            agent_defaults, {}, "member_acp_backend"
+        )
         cfg._base_unreadable = doc.base_unreadable
         cfg._overlay_unreadable = doc.overlay_unreadable
         if (
