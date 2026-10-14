@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         logger,
         queued_text_for_display,
         quote_meta,
+        settle_consumed_steers,
     )
 
 
@@ -119,7 +120,7 @@ def _settle_consumed_steers(
     previous = list(slot._pending_steers)
     from kiro_crew.dashboard import responsive_chat
 
-    remaining = responsive_chat.settle_steers(slot, previous, snapshot)
+    remaining = responsive_chat.settle_steers(slot, previous, snapshot, settle_consumed_steers)
     settled_count = len(previous) - len(remaining)
     logger.debug(
         "Steer consumed for slot %s (%d settled, %d still pending)",

@@ -14,7 +14,8 @@ import { createTranscriptRenderers } from '../pages/chat/transcriptRenderers'
 import ChatInput, { type ComposerBusyMode } from './ChatInput'
 import type { ChatInputProps } from './chat-input/props'
 import { busySteerFlag } from './chat-input/busySend'
-import { filterCrewmateChat } from './chat/crewmateBubbles'
+import { filterCrewmateChat, withQueuedAsBubbles } from './chat/crewmateBubbles'
+import { AWAITING_REPLY_ACTIVITY, useCrewmateAwaitingReply } from './chat/useCrewmateAwaitingReply'
 import CrewmateLiveActivity from './chat/CrewmateLiveActivity'
 import { useCrewmateGreetingShown } from './chat/useCrewmateGreetingShown'
 import type { CrewmateIdentity } from '../pages/chat/CrewmateMessage'
@@ -557,9 +558,15 @@ export default function ChatPane({
   // is the status line above the footer (`liveActivity`), not a transcript
   // row, so the working indicator holds still while steps come and go.
   const crewmateLive = running || !!paneSlot?.running
+  // The typing bubble shows from the person's Send, not only once the turn
+  // that answers is live (useCrewmateAwaitingReply).
+  const { awaitingReply, markSent: markCrewmateSent } = useCrewmateAwaitingReply(!!crewmate, slotKey, allMessages, crewmateLive)
+  const crewmateTyping = crewmateLive || awaitingReply
+  // Queued rows are drawn in place from the slot's full row list, so a parked
+  // message sits where it was sent (`withQueuedAsBubbles`).
   const messages = useMemo(
-    () => (crewmate ? filterCrewmateChat(paneMessages) : paneMessages),
-    [crewmate, paneMessages],
+    () => (crewmate ? filterCrewmateChat(withQueuedAsBubbles(allMessages, queuedMessages)) : paneMessages),
+    [crewmate, allMessages, paneMessages, queuedMessages],
   )
   // The host's greeting is drawn while it is still the newest word: a reply
   // landing after it (a patrol / wake turn keeps it up) takes it down.
@@ -1277,13 +1284,17 @@ export default function ChatPane({
     // the optimistic bubble — without this id the echo appends a SECOND user
     // bubble carrying the raw marker.
     const sendId = mintSendId()
-    // A crewmate send always appears immediately; a real queued receipt
-    // replaces it with the cancellable queue entry. Ordinary Sessions keep
-    // their busy-send bubble policy and correlated server echo.
+    // A crewmate send always appears immediately and stays one bubble: a real
+    // queued receipt keeps it, and the queue entry takes its place in the
+    // thread. Ordinary Sessions keep their busy-send bubble policy and
+    // correlated server echo.
     const meta = { ...turn.meta, sendId }
     const bubbleMinted = (!!crewmate || !busy) && (text || files.length || sentQuote)
     if (bubbleMinted) {
-      if (crewmate) drainPendingChunks()
+      if (crewmate) {
+        drainPendingChunks()
+        markCrewmateSent(sendId)
+      }
       dispatch(appendSlotMessage({
         slot: slotKey,
         message: { role: 'user', content: displayTxt, cls: 'msg msg-u', ts: new Date().toISOString(), meta: { ...meta, ...(crewmate ? { responsiveSend: true } : {}) } },
@@ -1370,9 +1381,12 @@ export default function ChatPane({
         // of when the correlated echo arrives, and confirmOptimisticSend no-ops
         // when a busy send skipped the bubble.
         resolveBubble: (outcome) => {
-          // A responsive send always has a bubble: a real queue or refusal
-          // replaces it, but an indeterminate response keeps it pending.
-          if (crewmate && outcome === 'drop' && receipt.status !== 'response-late') {
+          // A responsive send always has a bubble: a refusal replaces it, an
+          // indeterminate response keeps it pending, and a real queue keeps
+          // it too -- the queued entry takes the bubble's place and key
+          // (appendCorrelatedQueue), so the person's message never leaves the
+          // thread to be redrawn at the bottom.
+          if (crewmate && outcome === 'drop' && receipt.status !== 'response-late' && receipt.status !== 'queued') {
             dispatch(resolveOptimisticSteer({ slot: slotKey, sendId, outcome: 'queued' }))
           }
           if (outcome !== 'turn') return
@@ -1401,7 +1415,7 @@ export default function ChatPane({
       if (!askAtSend) return
       void resolveAskAfterSend(receipt.body, askAtSend, dispatch, slotKey)
     })
-  }, [input, pendingFiles, pasteBlocks, setPasteBlocks, busy, crewmate, slotKey, dispatch, restoreIntoComposer, reportSendFailure, scrollToBottom, consumeQuote, recoverQuoteInto, interceptPaneSlash])
+  }, [input, pendingFiles, pasteBlocks, setPasteBlocks, busy, crewmate, slotKey, dispatch, restoreIntoComposer, reportSendFailure, scrollToBottom, consumeQuote, recoverQuoteInto, interceptPaneSlash, markCrewmateSent])
 
   // Mid-turn steer: inject the composer content into the RUNNING turn instead
   // of queueing behind it. The pane's counterpart to ChatPage.steer, on the
@@ -2034,10 +2048,13 @@ export default function ChatPane({
               <>
               {greetingShown && crewmateGreeting}
               {crewmate
-                ? crewmateLive && (
+                ? crewmateTyping && (
                   <CrewmateLiveActivity
                     key={slotKey}
-                    activity={liveActivity}
+                    // Before the answering turn runs there is no live reading
+                    // to name (the slot's status record is the last turn's),
+                    // so the caption says it is working on it.
+                    activity={crewmateLive ? liveActivity : AWAITING_REPLY_ACTIVITY}
                     streamingText={messages[messages.length - 1]?.role === 'streaming' && streamState === 'streaming'}
                     streamTick={
                       messages[messages.length - 1]?.role === 'streaming'
@@ -2096,7 +2113,9 @@ export default function ChatPane({
             without a steer channel, a mid-plan send) must stay visible and
             cancellable — hiding real state is worse than showing a card the
             surface did not intend. */}
-        {queuedMessages.length > 0 && (
+        {/* A crewmate's chat draws a queued message as the person's own
+            bubble in the thread instead (`withQueuedAsBubbles`). */}
+        {!crewmate && queuedMessages.length > 0 && (
           <QueueStack messages={queuedMessages} onCancel={onCancelQueued} onInterrupt={crewmate ? undefined : onInterruptQueued} onEdit={onEditQueued} onReorder={onReorderQueued} pendingIds={queuePendingIds} />
         )}
 
@@ -2171,7 +2190,8 @@ export default function ChatPane({
               // answer stays in the transcript and survives reload), and every
               // other outcome (`queued`/drop) REMOVES it (so a queued answer shows
               // only as its QueueStack card, never a duplicate, and a failed one
-              // leaves no orphan). The card cleared on submit, so a genuine
+              // leaves no orphan; a crewmate chat, which draws no queue card,
+              // keeps the queued answer's bubble instead). The card cleared on submit, so a genuine
               // non-delivery hands the answer back to the composer via `restore`,
               // UNLESS the `steer_push`/user echo carrying this `sendId` already
               // reconciled the bubble -- proof it landed, so no restore and no
@@ -2185,6 +2205,7 @@ export default function ChatPane({
               // post-steer chunks would corrupt transcript order (#6075 class).
               // Only a live steer injects into a streaming turn, so only it drains.
               if (steerLive || crewmate) drainPendingChunks()
+              if (crewmate) markCrewmateSent(sendId)
               dispatch(appendSlotMessage({ slot: slotKey, message: { role: 'user', content: text, cls: 'msg msg-u', ts: new Date().toISOString(), meta: { ...(steerLive ? { steer: true } : {}), ...(crewmate ? { responsiveSend: true } : {}), optimistic: true, sendId } } }))
               void sendTurn({ message: text, slot: slotKey, meta: { sendId }, ...(crewmate ? { responsive: true } : {}), ...(steerLive ? { steer: true } : {}) }).then((receipt) => {
                 applySteerReceipt(receipt, {
@@ -2208,7 +2229,12 @@ export default function ChatPane({
                   // a turn; drop it on every other outcome (queued/refused/late) so
                   // a queued answer shows only as its QueueStack card and a failed
                   // one leaves no orphan.
-                  resolveBubble: (outcome) => dispatch(resolveOptimisticSteer({ slot: slotKey, sendId, outcome: outcome === 'turn' ? 'turn' : 'queued' })),
+                  resolveBubble: (outcome) => {
+                    // A crewmate chat keeps a queued answer's bubble: its queued
+                    // entry takes the bubble's place (appendCorrelatedQueue).
+                    if (crewmate && receipt.status === 'queued') return
+                    dispatch(resolveOptimisticSteer({ slot: slotKey, sendId, outcome: outcome === 'turn' ? 'turn' : 'queued' }))
+                  },
                   // Text-only card answer: no queued-stash binding to carry.
                   stashDemoted: () => undefined,
                 })

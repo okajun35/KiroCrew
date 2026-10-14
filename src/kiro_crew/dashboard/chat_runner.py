@@ -8564,6 +8564,7 @@ async def _end_turn_tail(
         _arm_parked_queue_drain(state, slot, notice=False)
     if slot._responsive is not None and slot._responsive.owner is turn_exit.responsive_owner:
         slot._responsive.owner = None
+        slot._responsive.cancel_grace()
     await _hand_off_queue(
         state,
         slot,
@@ -9648,8 +9649,13 @@ async def _run_chat(
             _ttft_visible.mark(wire)
             state.broadcast_ws("chat_thinking", {"slot": slot.key, "content": wire})
 
-    def _steer_segment_cut() -> None:
+    def _steer_segment_cut(*, interrupted: bool = True) -> None:
         """Finalize the accumulated text as a segment at a mid-turn steer.
+
+        ``interrupted=False`` is the crewmate send that waits behind this turn
+        (``responsive_chat.accept``): the segment is cut so the person's row
+        lands where they sent it, but the reply goes on, so it is not marked
+        cut off.
 
         Published on the slot (next to ``_acp_client``) so the dashboard steer
         handler can cut the segment right BEFORE it persists the steer user
@@ -9699,7 +9705,7 @@ async def _run_chat(
                 assistant_text,
                 broadcast=False,
                 quiet_persist=True,
-                interrupted=True,
+                interrupted=interrupted,
             )
             # The flushed segment IS visible output. Every other mid-turn site
             # that resets assistant_text (compaction, clear, agent switch,
@@ -18541,7 +18547,17 @@ async def _run_chat(
             and not _is_monitor_wake
         ):
             _maybe_consolidate(state, slot)
-        state.sessions.check_context_usage(session_key, client)
+        # An interrupted owner can otherwise queue /compact ahead of the human
+        # answer on the same permit. The protected answering turn checks again.
+        _defer_compaction = (
+            _responsive_turn.owner is _responsive_owner
+            and _responsive_turn.interrupted
+            and responsive_chat.first_priority_id(slot) is not None
+        )
+        if _defer_compaction:
+            state.sessions.check_context_usage(session_key, client, defer_compaction=True)
+        else:
+            state.sessions.check_context_usage(session_key, client)
         pct = client.context_usage_pct()
         state.broadcast_context_usage(slot.key, _context_usage_payload(slot.key, client))
         if (

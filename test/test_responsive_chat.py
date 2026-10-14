@@ -19,6 +19,8 @@ from kiro_crew.dashboard import chat_handlers, chat_runner
 from kiro_crew.dashboard import responsive_chat as rc
 from kiro_crew.dashboard.slot_queue_repository import sanitize_restored_queue
 from kiro_crew.dashboard.state import _ChatSlot
+from kiro_crew.dashboard.steer_settle import settle_consumed_steers
+from kiro_crew.history import HUMAN_TURN_META_KEY
 
 
 @pytest.fixture
@@ -102,7 +104,11 @@ async def test_busy_send_preserves_payload_and_cancels_exact_owner_once(fixture)
     assert entry["meta"]["files"] == meta["files"]
     assert "custom" not in entry["meta"]
     assert rc.priority_entry(entry)
-    assert not any(row["content"] == "New question" for row in slot.messages)
+    # Written where it was sent, once: the drain reuses this row.
+    rows = [row for row in slot.messages if row["content"] == "New question"]
+    assert len(rows) == 1 and rows[0]["meta"]["sendId"] == "send-a"
+    assert entry["_responsive_row"] is rows[0]
+    assert rc.reusable_row(slot, [entry], "New question") is rows[0]
     state.sessions.cancel_owned_turn.assert_awaited_once_with(
         rc.effective_session_key(slot), owner, wait_ack_timeout=rc.CANCEL_ACK_SECONDS
     )
@@ -177,6 +183,52 @@ async def test_concurrent_burst_does_not_issue_second_cancel(fixture):
         release.set()
         await asyncio.wait_for(first, timeout=30)
         slot.task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_send_behind_a_running_reply_is_written_where_it_was_sent(fixture):
+    """The person's chat draws a waiting send where it was sent, with the rest
+    of the running reply below it. The transcript must say the same, or the
+    turn-end reconcile and a reload move the message below text that came
+    after it: the segment is cut at the send and the row written then."""
+    state, slot, request, *_ = fixture
+    _busy(slot)
+    rc.begin_turn(slot, protected=True)
+    cuts = []
+
+    def cut(*, interrupted=True):
+        cuts.append(interrupted)
+        slot.append("assistant", "Reply so far")
+
+    slot._steer_segment_cut = cut
+    await rc.accept(request, slot, "Hello", {"sendId": "send-hello"})
+    state.sessions.cancel_owned_turn.assert_not_called()
+    assert cuts == [False], "the reply goes on, so it is not marked cut off"
+    assert [row["content"] for row in slot.messages[-2:]] == ["Reply so far", "Hello"]
+    row = slot.messages[-1]
+    assert row["role"] == "user"
+    assert row["meta"]["sendId"] == "send-hello"
+    assert row["meta"][HUMAN_TURN_META_KEY] is True
+    entry = slot._queue[0]
+    assert rc.reusable_row(slot, [entry], "Hello") is row
+    slot.task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_idle_or_stopping_send_writes_no_row_at_send(fixture, monkeypatch):
+    _, slot, request, *_ = fixture
+
+    async def start(state, slot):
+        return None
+
+    monkeypatch.setattr(chat_runner, "_start_next_queued_turn", start)
+    await rc.accept(request, slot, "Idle hello", None)
+    assert not any(row["content"] == "Idle hello" for row in slot.messages)
+    _busy(slot)
+    slot._stop_state = "soft_pending"
+    await rc.accept(request, slot, "Stopping hello", None)
+    assert not any(row["content"] == "Stopping hello" for row in slot.messages)
+    slot.task.cancel()
 
 
 @pytest.mark.asyncio
@@ -317,7 +369,7 @@ async def test_real_runner_injects_turn_guidance_without_changing_user_text(
     client.is_alive = MagicMock(return_value=True)
     client.supports_steer = False
     client.client = SimpleNamespace(
-        pop_pending_oauth_requests=lambda: [],
+        pop_pending_oauth_requests=list,
         awaiting_permission=False,
         last_prompt_stats=None,
         pending_steers=[],
@@ -356,6 +408,86 @@ async def test_cancel_rechecks_stop_and_replacement_before_rpc(fixture, monkeypa
     assert len(slot._queue) == 1
     state.sessions.cancel_owned_turn.assert_not_called()
     slot.task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_real_turn_keeps_a_waiting_send_where_it_was_sent(fixture, tmp_path, monkeypatch):
+    """A send that waits behind a turn which goes on answering (here: its
+    priority attempt is already spent) sits in the transcript between the text
+    streamed before it and the text after it, and the drain writes no second
+    row -- the order the person's chat drew live, and what a reload reads."""
+    from test_chat_runner_coverage import _complete, _runner_state, _slot
+
+    from kiro_crew.providers.base import EVENT_TEXT_CHUNK, LLMEvent
+
+    state, client = _runner_state(tmp_path)
+    slot = _slot("responsive-order")
+    state._slots[slot.key] = slot
+    request = SimpleNamespace(app={"state": state})
+    client.client = SimpleNamespace(
+        pop_pending_oauth_requests=lambda: [],
+        awaiting_permission=False,
+        last_prompt_stats=None,
+        pending_steers=[],
+        supports_steer=False,
+        has_active_turn=lambda: True,
+    )
+    client.billing_stats = MagicMock(return_value=None)
+    client.has_active_turn = MagicMock(return_value=True)
+    client.is_alive = MagicMock(return_value=True)
+    client.supports_steer = False
+    state.sessions.is_compacting = lambda key: False
+    state.sessions.cancel_owned_turn = AsyncMock(return_value="acked")
+    entered, resume = asyncio.Event(), asyncio.Event()
+    prompts = []
+
+    async def stream(prompt):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="Before the send.")
+            entered.set()
+            await asyncio.wait_for(resume.wait(), timeout=30)
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="After the send.")
+            yield _complete()
+        else:
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="Hello back.")
+            yield _complete()
+
+    client.stream = MagicMock(side_effect=stream)
+    monkeypatch.setattr(chat_runner, "subagents_hold_user_messages", lambda *a: False)
+    slot.append("user", "First ask")
+    original = asyncio.create_task(
+        chat_runner._run_chat(
+            state, slot, "First ask", _responsive_human=True, _directive_user_origin=True
+        )
+    )
+    slot.task = original
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=30)
+        rc.turn_state(slot).attempted = True  # this turn already took its one cancel
+        await rc.accept(request, slot, "Hello", {"sendId": "send-hello"})
+        resume.set()
+        await asyncio.wait_for(original, timeout=30)
+        successor = slot.task
+        if successor is not None and successor is not original:
+            await asyncio.wait_for(successor, timeout=30)
+    finally:
+        resume.set()
+        if not original.done():
+            original.cancel()
+        await asyncio.wait_for(asyncio.gather(original, return_exceptions=True), timeout=30)
+    state.sessions.cancel_owned_turn.assert_not_called()
+    spoken = [
+        (r["role"], r["content"]) for r in slot.messages if r["role"] in ("user", "assistant")
+    ]
+    assert spoken == [
+        ("user", "First ask"),
+        ("assistant", "Before the send."),
+        ("user", "Hello"),
+        ("assistant", "After the send."),
+        ("assistant", "Hello back."),
+    ]
+    assert prompts[1].endswith("Hello")
 
 
 @pytest.mark.asyncio
@@ -533,7 +665,7 @@ def test_enriched_steer_echo_does_not_settle_a_wire_collision():
     raw = "short"
     slot._steer_delivery_ids[raw] = "delivery"
     wire = rc.steer_message(slot, raw)
-    assert rc.settle_steers(slot, [raw, wire], wire) == [raw, wire]
+    assert rc.settle_steers(slot, [raw, wire], wire, settle_consumed_steers) == [raw, wire]
 
 
 def test_recovery_anchor_keeps_original_task_after_a_consumed_steer():

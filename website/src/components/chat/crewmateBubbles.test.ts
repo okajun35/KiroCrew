@@ -10,6 +10,8 @@ import {
   isCrewmateSpeech,
   opensCrewmateRun,
   crewmateRowClass,
+  withQueuedAsBubbles,
+  awaitingCrewmateReply,
 } from './crewmateBubbles'
 
 const at = (iso: string) => iso
@@ -340,3 +342,56 @@ describe('crewmateRowClass', () => {
   })
 })
 
+
+describe('withQueuedAsBubbles', () => {
+  const queuedRow = (id: string, content: string, sendId?: string): ChatMessage =>
+    ({ role: 'queued', content, cls: 'msg msg-queued', ts: '2026-10-14T08:00:02Z', meta: { queueId: id, ...(sendId ? { sendId } : {}) } })
+
+  it('draws a queued message where it was sent, so a later reply sits below it', () => {
+    const q = queuedRow('q1', 'second')
+    const out = withQueuedAsBubbles([user('2026-10-14T08:00:00Z', 'first'), q, said('2026-10-14T08:00:03Z', 'reply to first')], [q])
+    expect(out.map(m => [m.role, m.content])).toEqual([['user', 'first'], ['user', 'second'], ['assistant', 'reply to first']])
+    expect(out[1].meta?.queuedBubble).toBe(true)
+  })
+
+  it('drops queued rows the chat does not draw and the requeued twin of a shown send', () => {
+    const shown: ChatMessage = { ...user('2026-10-14T08:00:00Z', 'asked'), meta: { sendId: 's1' } }
+    const twin = queuedRow('q1', 'asked', 's1')
+    const hidden = queuedRow('q2', 'system delivery')
+    expect(withQueuedAsBubbles([shown, twin, hidden], [twin]).map(m => m.content)).toEqual(['asked'])
+  })
+
+  it('hands the same array back when nothing is queued', () => {
+    const all = [user('2026-10-14T08:00:00Z')]
+    expect(withQueuedAsBubbles(all, [])).toBe(all)
+  })
+})
+
+describe('awaitingCrewmateReply', () => {
+  const sent = (meta: Record<string, unknown> = {}): ChatMessage => ({ ...user('2026-10-14T08:00:00Z', 'ping'), meta: { sendId: 's1', ...meta } })
+
+  it('waits from the send until the crewmate answers', () => {
+    expect(awaitingCrewmateReply([sent({ optimistic: true })], 's1')).toBe(true)
+    expect(awaitingCrewmateReply([sent(), tool('2026-10-14T08:00:01Z')], 's1')).toBe(true)
+    expect(awaitingCrewmateReply([sent(), said('2026-10-14T08:00:02Z')], 's1')).toBe(false)
+  })
+
+  it('waits while the send is parked in the queue, behind an earlier reply', () => {
+    const q: ChatMessage = { role: 'queued', content: 'ping', cls: '', meta: { queueId: 'q1', sendId: 's1' } }
+    expect(awaitingCrewmateReply([said('2026-10-14T07:59:00Z'), q], 's1')).toBe(true)
+  })
+
+  it('a quiet end, an error, a stop card or a pending approval ends the wait', () => {
+    const quiet: ChatMessage = { role: 'assistant', content: '\u200B', cls: '' }
+    const error: ChatMessage = { role: 'error', content: 'failed', cls: '' }
+    const stop: ChatMessage = { role: 'system', content: '', cls: '', kind: 'stop_event', meta: { kind: 'stop_event' } }
+    const ask: ChatMessage = { role: 'permission', content: 'allow?', cls: '', meta: { approval_id: 'a1' } }
+    for (const row of [quiet, error, stop, ask]) expect(awaitingCrewmateReply([sent(), row], 's1')).toBe(false)
+  })
+
+  it('waits on nothing for a dropped send, a send in doubt or no send', () => {
+    expect(awaitingCrewmateReply([said('2026-10-14T08:00:02Z')], 's1')).toBe(false)
+    expect(awaitingCrewmateReply([sent({ optimistic: true, deliveryUnconfirmed: true })], 's1')).toBe(false)
+    expect(awaitingCrewmateReply([sent()], undefined)).toBe(false)
+  })
+})

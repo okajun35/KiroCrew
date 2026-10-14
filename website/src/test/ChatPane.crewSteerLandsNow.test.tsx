@@ -9,7 +9,7 @@ import { configureStore } from '@reduxjs/toolkit'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ThemeProvider } from '../hooks/useTheme'
 import chatReducer, { appendSlotMessage, selectSlotMessages, setActiveSlot, setQuestionCard, sseChatMessage, sseSubagentPending } from '../store/chatSlice'
-import dashboardReducer from '../store/dashboardSlice'
+import dashboardReducer, { updateSlot } from '../store/dashboardSlice'
 import notificationsReducer from '../store/notificationsSlice'
 import { __resetPaneDraftsForTests } from '../utils/chatPaneDrafts'
 import type { ChatMessage } from '../types'
@@ -198,16 +198,27 @@ describe('crewmate responsive Send', () => {
     expect(screen.getByText(/request refused/)).toBeInTheDocument()
   })
 
-  it('a real queued receipt replaces the provisional bubble without offering a client interrupt', async () => {
+  it.each(['receipt first', 'push first'])('a real queued receipt keeps the one bubble in place (%s), with no queue card or interrupt', async (order) => {
+    const { appendQueuedMessage } = await import('../store/chatSlice')
     const { store } = renderCrewmate()
     await send('queued safely')
-    act(() => {
-      store.dispatch(appendSlotMessage({ slot: SLOT, message: { role: 'queued', content: 'queued safely', cls: '', meta: { queueId: 'queue-fixed' } } }))
+    const sendId = vi.mocked(api.sendChat).mock.calls[0][4]!.sendId as string
+    const bubble = screen.getByText('queued safely')
+    const push = () => act(() => {
+      store.dispatch(appendQueuedMessage({ slot: SLOT, content: 'queued safely', ts: '2026-10-14T07:00:02Z', queue_id: 'queue-fixed', meta: { sendId } }))
     })
+    if (order === 'push first') push()
+    expect(screen.getByText('queued safely')).toBe(bubble)
+    expect(screen.queryByTestId('queue-card')).toBeNull()
     await settle({ ok: true, queued: true, queue_id: 'queue-fixed' })
-    expect(userRows(store)).toHaveLength(0)
+    // Between the receipt and the push the bubble used to be spliced out and
+    // redrawn from the queue entry: a visible flash at the bottom.
+    expect(screen.getByText('queued safely')).toBe(bubble)
+    if (order === 'receipt first') push()
     expect(screen.getAllByText('queued safely')).toHaveLength(1)
-    expect(screen.getByTestId('queue-card')).toBeInTheDocument()
+    expect(screen.getByText('queued safely')).toBe(bubble)
+    expect(userRows(store)).toHaveLength(0)
+    expect(screen.queryByTestId('queue-card')).toBeNull()
     expect(screen.queryByRole('button', { name: /interrupt/i })).toBeNull()
   })
 
@@ -348,6 +359,163 @@ describe('responsive question and queue repairs', () => {
     expect(screen.queryByText(/Delivery pending/)).toBeNull()
     expect(box).toHaveValue('')
     expect(screen.getAllByText('exact queue message')).toHaveLength(1)
-    expect(!!screen.queryByTestId('queue-card')).toBe(!drained)
+    expect(screen.queryByTestId('queue-card')).toBeNull()
+  })
+
+  it('a steered send keeps one bubble when its unconsumed steer is requeued for the next turn', async () => {
+    const { appendQueuedMessage, removeQueuedMessage } = await import('../store/chatSlice')
+    const { store } = renderCrewmate()
+    await send('answer me first')
+    const sendId = vi.mocked(api.sendChat).mock.calls[0][4]!.sendId as string
+    act(() => {
+      store.dispatch(appendSlotMessage({ slot: SLOT, message: { role: 'user', content: 'answer me first', cls: 'msg msg-u', ts: '2026-10-14T07:00:01Z', meta: { sendId, mid: 'mid-steer', steer: true, steerState: 'written', steer_delivery_id: 'd-1' } } }))
+    })
+    await settle({ ok: true, steered: true, responsive: 'steered' })
+    expect(userRows(store)).toHaveLength(1)
+    expect(userRows(store)[0].meta?.optimistic).toBeUndefined()
+    // The grace expired: the cancelled turn's teardown requeues the same send.
+    act(() => {
+      store.dispatch(appendQueuedMessage({ slot: SLOT, content: 'answer me first', ts: FIXED_TIME.toISOString(), queue_id: 'q-steer', meta: { sendId } }))
+    })
+    expect(screen.getAllByText('answer me first')).toHaveLength(1)
+    expect(screen.queryByTestId('queue-card')).toBeNull()
+    expect(screen.queryByText(/Steered|Steering|runs as its own/)).toBeNull()
+    act(() => {
+      store.dispatch(removeQueuedMessage({ slot: SLOT, content: 'answer me first', queue_id: 'q-steer', drain_writes_row: true, meta: { sendId } }))
+    })
+    expect(screen.getAllByText('answer me first')).toHaveLength(1)
+    expect(userRows(store)).toHaveLength(1)
+  })
+})
+
+describe('crewmate chat order and typing while a send waits', () => {
+  const before = (a: HTMLElement, b: HTMLElement) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+
+  it('a queued message sits where it was sent: a later reply draws below it, and the drain keeps the order and the node', async () => {
+    const { appendQueuedMessage, removeQueuedMessage } = await import('../store/chatSlice')
+    const { store } = renderCrewmate({ messages: [{ role: 'user', content: 'first ask', cls: 'msg msg-u', ts: '2026-10-14T06:59:00Z' }] })
+    await screen.findByText('first ask')
+    await send('second ask')
+    const sendId = vi.mocked(api.sendChat).mock.calls[0][4]!.sendId as string
+    act(() => {
+      store.dispatch(appendQueuedMessage({ slot: SLOT, content: 'second ask', ts: '2026-10-14T07:00:02Z', queue_id: 'q-order', meta: { sendId } }))
+    })
+    await settle({ ok: true, queued: true, queue_id: 'q-order' })
+    const queued = screen.getByText('second ask')
+    act(() => {
+      store.dispatch(appendSlotMessage({ slot: SLOT, message: { role: 'assistant', content: 'reply to the first', cls: 'msg msg-a', ts: '2026-10-14T07:00:03Z' } }))
+    })
+    const reply = await screen.findByText('reply to the first')
+    expect(before(screen.getByText('first ask'), queued)).toBe(true)
+    expect(before(queued, reply)).toBe(true)
+    act(() => {
+      store.dispatch(removeQueuedMessage({ slot: SLOT, content: 'second ask', queue_id: 'q-order', meta: { sendId } }))
+    })
+    expect(screen.getAllByText('second ask')).toHaveLength(1)
+    expect(screen.getByText('second ask')).toBe(queued)
+    expect(before(screen.getByText('second ask'), screen.getByText('reply to the first'))).toBe(true)
+    const rows = selectSlotMessages(store.getState() as RootState, SLOT)
+    expect(rows.map(m => [m.role, m.content])).toEqual([
+      ['user', 'first ask'], ['user', 'second ask'], ['assistant', 'reply to the first'],
+    ])
+    expect(rows[1].meta?.optimistic).toBeUndefined()
+  })
+
+  it('shows the typing bubble the moment an idle DM is sent to, and drops it when the reply lands', async () => {
+    const { store } = renderCrewmate({ running: false })
+    await ready()
+    expect(screen.queryByTestId('crewmate-live-activity')).toBeNull()
+    await send('are you there')
+    expect(screen.getByTestId('crewmate-live-activity')).toBeInTheDocument()
+    expect(screen.getByTestId('crewmate-typing-bubble')).toHaveAttribute('data-shown', 'true')
+    expect(screen.getByTestId('crewmate-live-activity')).toHaveAttribute('data-activity', 'working')
+    await settle({ ok: true, dispatched: true })
+    expect(screen.getByTestId('crewmate-live-activity')).toBeInTheDocument()
+    act(() => {
+      store.dispatch(appendSlotMessage({ slot: SLOT, message: { role: 'assistant', content: 'here', cls: 'msg msg-a', ts: '2026-10-14T07:00:04Z' } }))
+    })
+    await screen.findByText('here')
+    expect(screen.queryByTestId('crewmate-live-activity')).toBeNull()
+  })
+
+  it('keeps typing through the end of the earlier turn while the send is queued, and stops when its own turn ends silently', async () => {
+    const { appendQueuedMessage, removeQueuedMessage } = await import('../store/chatSlice')
+    const { store } = renderCrewmate({ running: true })
+    await send('after this one')
+    const sendId = vi.mocked(api.sendChat).mock.calls[0][4]!.sendId as string
+    act(() => {
+      store.dispatch(appendQueuedMessage({ slot: SLOT, content: 'after this one', ts: '2026-10-14T07:00:02Z', queue_id: 'q-wait', meta: { sendId } }))
+    })
+    await settle({ ok: true, queued: true, queue_id: 'q-wait' })
+    // The earlier turn ends; this send is still parked for the next one.
+    act(() => { store.dispatch(updateSlot({ key: SLOT, running: false })) })
+    expect(screen.getByTestId('crewmate-live-activity')).toHaveAttribute('data-activity', 'working')
+    act(() => {
+      store.dispatch(removeQueuedMessage({ slot: SLOT, content: 'after this one', queue_id: 'q-wait', meta: { sendId } }))
+      store.dispatch(updateSlot({ key: SLOT, running: true }))
+    })
+    expect(screen.getByTestId('crewmate-live-activity')).toBeInTheDocument()
+    // Its own turn ends without writing a word: nothing is coming.
+    act(() => { store.dispatch(updateSlot({ key: SLOT, running: false })) })
+    expect(screen.queryByTestId('crewmate-live-activity')).toBeNull()
+  })
+
+  it('a send that waits behind a streaming reply keeps its place through the row written at send, the reply\'s end and the turn-end warm', async () => {
+    const { appendQueuedMessage, removeQueuedMessage, warmSlotCache } = await import('../store/chatSlice')
+    const first: ChatMessage = { role: 'user', content: 'first ask', cls: 'msg msg-u', ts: '2026-10-14T06:59:00Z', meta: { mid: 'u-first' } }
+    const { store } = renderCrewmate({ messages: [first] })
+    await screen.findByText('first ask')
+    act(() => { store.dispatch(sseChatMessage({ slot: SLOT, role: 'chunk', content: 'part one', seq: 1 })) })
+    await send('second ask')
+    // The virtual row wrapper is keyed by the row's key; it surviving means the
+    // message never left its place to be redrawn.
+    const rowOf = () => screen.getByText('second ask').closest('[data-display-index]')
+    const row = rowOf()
+    expect(row).not.toBeNull()
+    const sendId = vi.mocked(api.sendChat).mock.calls[0][4]!.sendId as string
+    const order = () => [...document.querySelectorAll('[data-role="user"], [data-role="assistant"]')]
+      .map(e => `${e.getAttribute('data-role')}:${e.querySelector('.message-bubble')?.textContent}`)
+    // The gateway's frames for a send that waits (responsive_chat.accept):
+    // the queue entry, then the user row it writes at send time.
+    act(() => {
+      store.dispatch(appendQueuedMessage({ slot: SLOT, content: 'second ask', ts: '2026-10-14T07:00:02Z', queue_id: 'q-wait', meta: { sendId } }))
+      store.dispatch(sseChatMessage({ slot: SLOT, role: 'user', content: 'second ask', ts: '2026-10-14T07:00:02.5Z', meta: { sendId, mid: 'u-second' } }))
+    })
+    await settle({ ok: true, queued: true, queue_id: 'q-wait', responsive: 'queued' })
+    // The reply goes on below the message; the segment the gateway cut at the
+    // send holds only what came after it.
+    act(() => {
+      store.dispatch(sseChatMessage({ slot: SLOT, role: 'chunk', content: 'part two', seq: 2 }))
+      store.dispatch(sseChatMessage({ slot: SLOT, role: 'assistant', content: 'part two', ts: '2026-10-14T07:00:05Z', meta: { mid: 'a-two' } }))
+    })
+    const live = ['user:first ask', 'assistant:part one', 'user:second ask', 'assistant:part two']
+    expect(order()).toEqual(live)
+    // The row written at send took the queued bubble's place and key.
+    expect(rowOf()).toBe(row)
+    // Turn end: the pane warms from the gateway's history, which now holds the
+    // rows in the order they were sent, with the entry still queued.
+    const history: ChatMessage[] = [
+      first,
+      { role: 'assistant', content: 'part one', cls: 'msg msg-a', ts: '2026-10-14T07:00:01Z', meta: { mid: 'a-one' } },
+      { role: 'user', content: 'second ask', cls: 'msg msg-u', ts: '2026-10-14T07:00:02.5Z', meta: { mid: 'u-second', sendId } },
+      { role: 'assistant', content: 'part two', cls: 'msg msg-a', ts: '2026-10-14T07:00:05Z', meta: { mid: 'a-two' } },
+    ]
+    vi.mocked(api.chatSlotDetail).mockResolvedValue({ messages: history, running: false, has_more: false, total: history.length, queue: [{ content: 'second ask', queueId: 'q-wait', ts: '2026-10-14T07:00:02Z', meta: { sendId } }] } as never)
+    act(() => { store.dispatch(updateSlot({ key: SLOT, running: false })) })
+    await act(async () => { await store.dispatch(warmSlotCache(SLOT)) })
+    expect(order()).toEqual(live)
+    // The drain reuses that row (drain_writes_row), so nothing moves.
+    act(() => { store.dispatch(removeQueuedMessage({ slot: SLOT, content: 'second ask', queue_id: 'q-wait', drain_writes_row: true, meta: { sendId } })) })
+    expect(order()).toEqual(live)
+    expect(screen.getAllByText('second ask')).toHaveLength(1)
+  })
+
+  it('a refused send leaves no typing bubble behind', async () => {
+    renderCrewmate({ running: false })
+    await send('will be refused')
+    expect(screen.getByTestId('crewmate-live-activity')).toBeInTheDocument()
+    await settle({ ok: false, error: 'request refused' }, 409)
+    await screen.findByText(/request refused/)
+    expect(screen.queryByTestId('crewmate-live-activity')).toBeNull()
   })
 })

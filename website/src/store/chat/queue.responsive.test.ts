@@ -71,3 +71,52 @@ it.each([null, ['mine'], 42, '', 'x'.repeat(129), 'bad id'])('ignores malformed 
   expect(rows(state)).toHaveLength(2)
   expect(rows(state)[1].meta?.sendId).toBeUndefined()
 })
+
+describe.each([true, false])('a crewmate send keeps its place through queue and drain (active=%s)', (active) => {
+  const later = { role: 'assistant', content: 'reply to earlier', cls: '', ts: '2026-10-14T08:12:05Z' } as const
+  function sentThenReplied() {
+    let state = initial(active)
+    state = reducer(state, appendSlotMessage({ slot: SLOT, message: { ...later } }))
+    return state
+  }
+
+  it('the queue entry takes the bubble\'s index, ts and key; a later reply stays below it', () => {
+    const state = reducer(sentThenReplied(), appendQueuedMessage({ ...push, ts: '2026-10-14T08:12:09Z' }))
+    expect(rows(state).map(m => m.role)).toEqual(['queued', 'assistant'])
+    expect(rows(state)[0]).toMatchObject({ ts: TS, meta: { queueId: 'q1', sendId: 'mine', clientTs: TS, responsiveSend: true } })
+  })
+
+  it('the drain rebuilds the user row in the same place with the same ts and key', () => {
+    let state = reducer(sentThenReplied(), appendQueuedMessage(push))
+    state = reducer(state, removeQueuedMessage(pop))
+    expect(rows(state).map(m => [m.role, m.content])).toEqual([['user', 'same text'], ['assistant', 'reply to earlier']])
+    expect(rows(state)[0]).toMatchObject({ ts: TS, meta: { sendId: 'mine', clientTs: TS } })
+    expect(rows(state)[0].meta?.responsiveSend).toBeUndefined()
+    expect(rows(state)[0].meta?.optimistic).toBeUndefined()
+  })
+
+  it('a pop that missed its push still drains the bubble in place', () => {
+    const state = reducer(sentThenReplied(), removeQueuedMessage(pop))
+    expect(rows(state).map(m => m.role)).toEqual(['user', 'assistant'])
+    expect(rows(state)[0]).toMatchObject({ ts: TS, meta: { clientTs: TS } })
+  })
+
+  it('a refresh that still lists the entry leaves it where it was sent', () => {
+    const state = reducer(sentThenReplied(), appendQueuedMessage(push))
+    const queue = normalizeQueueEntries([{ id: 'q1', content: push.content, meta: push.meta }])
+    const hydrated = hydrateQueuedBubbles(rows(state), queue)
+    expect(hydrated.map(m => m.role)).toEqual(['queued', 'assistant'])
+    expect(hydrated[0].meta?.clientTs).toBe(TS)
+    expect(hydrateQueuedBubbles(rows(state), []).map(m => m.role)).toEqual(['assistant'])
+  })
+
+  it('an ordinary (Sessions) optimistic send is still replaced at the end', () => {
+    let state = { ...reducer(undefined, { type: '@@INIT' }), activeSlot: active ? SLOT : 'other' }
+    state = reducer(state, appendSlotMessage({ slot: SLOT, message: { role: 'user', content: 'same text', cls: '', ts: TS, meta: { sendId: 'mine' } } }))
+    state = reducer(state, appendSlotMessage({ slot: SLOT, message: { ...later } }))
+    state = reducer(state, appendQueuedMessage(push))
+    expect(rows(state).map(m => m.role)).toEqual(['assistant', 'queued'])
+    state = reducer(state, removeQueuedMessage(pop))
+    expect(rows(state).map(m => m.role)).toEqual(['assistant', 'user'])
+  })
+})

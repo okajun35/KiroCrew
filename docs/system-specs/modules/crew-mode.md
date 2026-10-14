@@ -2312,8 +2312,42 @@ While work runs, the conversation keeps the typing bubble and its status line
 above, but draws no subagent progress bars or completion cards. Questions, errors, authentication requests and native/spawn approvals
 remain visible and actionable. The header and task detail surfaces keep their
 existing state sources; this is a conversation-only presentation rule, not a
-change to execution or history. A genuinely queued message stays visible and
-cancellable, with edit/reorder but no interrupt control on this surface.
+change to execution or history. A queued message is drawn as the person's own
+bubble WHERE IT WAS SENT, with no queue card and no interrupt control: the
+order is strictly chronological, iMessage's rule, so a reply (even one to an
+earlier message) that arrives after it draws below it, and it never moves to
+the bottom. `withQueuedAsBubbles` draws the slot's queued rows in place from the
+store order. The person's own send is one stable bubble from Send to drain: a
+queued receipt keeps the optimistic bubble (`ChatPane` does not drop it), the
+`queue_push` replaces that bubble in place -- same index, same `ts`, the
+bubble's ts kept as `meta.clientTs`, marked `responsiveSend` (`appendCorrelatedQueue`)
+-- a refresh that still lists the entry leaves it there (`hydrateQueuedBubbles`),
+and the drain rebuilds the user row at that same index with the same `ts` and
+key (`removeQueuedMessage`), so the row is never removed and redrawn (the
+flash) and never re-keyed. Only these crewmate sends drain in place; any other
+drained entry is its turn's opener and still lands at the end. The transcript
+keeps the same order: a send that waits behind a live turn
+(`responsive_chat.write_row_at_send`) cuts that turn's running text segment
+(not marked interrupted, the reply goes on) and writes the person's user row at
+send time, and the drain reuses that row (`reusable_row`) instead of writing
+one after the whole reply -- so the turn-end reconcile and a reload read the
+order the chat drew live. Its echo takes the queued bubble's place and key
+(`reconcileOptimisticEcho`). No row is written for a send that starts its turn
+at once, or while a stop is settling the slot. Sessions keeps the cancellable
+queue card.
+
+The typing bubble also shows from the moment the person sends, before the
+turn that will answer is running (a queued send, or an interrupt-and-requeue,
+starts that turn seconds later): `awaitingCrewmateReply` holds while the
+pane's newest send still has its row (sent, queued or drained), its delivery
+is not in doubt (`deliveryUnconfirmed`), and nothing after it has answered --
+no assistant row (speech or the say-nothing row of a quiet end), error, stop
+card, pending approval or change card. A refused send's bubble is gone, so it
+waits on nothing. A live turn that ends while the send is not parked in the
+queue ends the wait too (the turn that answers it wrote no row); a turn that
+ends while the send is still queued is the one before it. Until the answering
+turn is live the caption reads the pill's `working` phase, never the slot's
+stale status record from the last turn.
 
 The crewmate `ChatPane` sends `responsive: true` on its normal Send request.
 Submitting a native question's answer while its turn runs additionally carries
@@ -2325,8 +2359,12 @@ not a decision model or a fork. Both that path and a validated explicit human
 steer receive reply-first/delegate-heavy-work principles as prompt context, not
 as displayed or persisted user text. Pending approvals/questions can defer the
 response rather than being silently rejected. An initial idle-admitted work turn
-remains interruptible; the priority answer admitted behind active work is protected
-so a burst queues rather than repeatedly cancelling that answer. Cancellation is
+remains interruptible; a send to a running turn is steered in first and cancels
+that turn only when the steer is still unconsumed after a 3-second grace, so a
+tool call that finishes in time is not thrown away. The priority answer admitted behind active work is protected
+so a burst queues rather than repeatedly cancelling that answer. A crewmate chat
+draws a requeued steer's queue entry as no second bubble: its send already has
+its row. Cancellation is
 not proof a tool or external side effect stopped. The full scheduling and recovery contract is in
 [session](session.md#responsive-human-sends-in-a-crewmate-dm). Ordinary Sessions
 and the reply-thread panel's separate reply endpoint retain their behavior.
@@ -2651,7 +2689,9 @@ Parent-change and impact previews use the server's redacted projection.
 | `test/test_crew_reasoning_effort.py` | Per-crew effort reaches a crew dispatch |
 | `test/test_members.py`, `test/test_members_dm_thread.py` | Slug validation and containment, activity recording and dedupe, DM-binding canonicality, rules and briefing reads, briefing endpoint |
 | `test/test_chat_send_agent_model_default.py` | The crew model default a new session starts on |
-| `website/src/components/chat/crewmateBubbles.test.ts` | What a crewmate's chat draws (machinery dropped, speech and user-facing rows kept, same array back when nothing is dropped) and the run rule (first/middle/last, single, breaks on a user row and a pending approval but not on a long silence, reads through a resolved approval and an untimestamped streaming row, corners on the left side only) |
+| `website/src/components/chat/crewmateBubbles.test.ts` | What a crewmate's chat draws (machinery dropped, speech and user-facing rows kept, same array back when nothing is dropped) and the run rule (first/middle/last, single, breaks on a user row and a pending approval but not on a long silence, reads through a resolved approval and an untimestamped streaming row, corners on the left side only); a queued message drawn where it was sent, the requeued twin and undrawn queued rows dropped; when a send is still awaiting a reply |
+| `website/src/test/ChatPane.crewSteerLandsNow.test.tsx` | A crewmate's responsive Send end to end, including one stable bubble through a queued receipt in either order with its push, a later reply drawn below a queued message and the drain keeping order and node, and the typing bubble from Send until a reply, a refusal or the answering turn's silent end |
+| `website/src/store/chat/queue.responsive.test.ts` | Exact queued-send identity, and a crewmate send keeping its index, `ts` and key through push, drain, a missed push and a refresh, while a Sessions send still lands at the end |
 
 ## Retired: Crew Mode
 

@@ -126,6 +126,54 @@ export function filterCrewmateChat(messages: ChatMessage[]): ChatMessage[] {
   return kept.length === messages.length ? messages : kept
 }
 
+/** A crewmate's chat has no queue card: a message the gateway parked for the
+ *  next turn is still just the person's message, so it is drawn as their own
+ *  bubble WHERE IT WAS SENT until the drain replaces it with the real user row
+ *  -- iMessage order: whatever arrives after it (a reply to an earlier message
+ *  included) draws below it. `all` is the slot's rows in store order, queued
+ *  rows in place; `queued` is the queued rows this chat draws (the interactive
+ *  ones), every other queued row is dropped. A queued entry whose send already
+ *  has its row -- a steer the turn did not take, requeued for the next one --
+ *  is that same message, so it draws no second bubble. Same array identity
+ *  back when `all` holds no queued row. */
+export function withQueuedAsBubbles(all: ChatMessage[], queued: ChatMessage[]): ChatMessage[] {
+  if (!all.some(m => m.role === 'queued')) return all
+  const drawn = new Set(queued)
+  const shown = new Set(all.filter(m => m.role === 'user' && m.meta?.sendId).map(m => m.meta?.sendId))
+  const out: ChatMessage[] = []
+  for (const m of all) {
+    if (m.role !== 'queued') { out.push(m); continue }
+    if (!drawn.has(m) || (m.meta?.sendId && shown.has(m.meta.sendId))) continue
+    out.push({ ...m, role: 'user', cls: 'msg msg-u', meta: { ...m.meta, queuedBubble: true } })
+  }
+  return out
+}
+
+/** Whether the person's send `sendId` is still waiting on the crewmate: its
+ *  row (sent, queued or drained) is in `all` (the slot's rows in store order),
+ *  its delivery is not in doubt, and nothing has answered it yet -- no
+ *  assistant row after it (speech, or the say-nothing row a quiet turn ends
+ *  on), no error, no stop card, no pending approval and no change card. While
+ *  this holds the chat shows its typing bubble even before the turn that will
+ *  answer is running: a live turn alone starts seconds after the send when the
+ *  send was queued or interrupted and requeued. A refused send's bubble is
+ *  gone, so it waits on nothing. */
+export function awaitingCrewmateReply(all: ChatMessage[], sendId: string | undefined): boolean {
+  if (!sendId) return false
+  let i = all.length - 1
+  for (; i >= 0; i -= 1) {
+    const m = all[i]
+    if ((m.role === 'user' || m.role === 'queued') && m.meta?.sendId === sendId) break
+  }
+  if (i < 0 || all[i].meta?.deliveryUnconfirmed) return false
+  for (let j = i + 1; j < all.length; j += 1) {
+    const m = all[j]
+    if (m.role === 'assistant' || m.role === 'error' || m.role === CARD_ROW_ROLE || isStopCard(m)) return false
+    if (m.role === 'permission' && !m.meta?.resolved) return false
+  }
+  return true
+}
+
 /** Nearest row in `dir` that is not run-transparent, or undefined at an end. */
 function neighbour(messages: ChatMessage[], index: number, dir: -1 | 1): ChatMessage | undefined {
   for (let j = index + dir; j >= 0 && j < messages.length; j += dir) {
