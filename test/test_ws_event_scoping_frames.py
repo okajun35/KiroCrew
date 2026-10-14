@@ -605,6 +605,13 @@ class TestApprovalResolvedCarriesSlot:
                 "chat_runner.py",
             )
         ]
+        roots += sorted(
+            owner
+            for owner in (
+                Path(__file__).resolve().parents[1] / "src/kiro_crew/dashboard/chat_turn"
+            ).glob("*.py")
+            if owner.name != "__init__.py"
+        )
         found = 0
         for path in roots:
             src = path.read_text(encoding="utf-8")
