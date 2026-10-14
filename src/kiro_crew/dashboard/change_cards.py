@@ -1186,7 +1186,7 @@ _SENSITIVE_SEGMENTS = frozenset(
 
 @functools.lru_cache(maxsize=1)
 def settings_registry() -> tuple[dict[str, Any], ...]:
-    """The packaged Settings registry (id, label, tab, description, configKey)."""
+    """The packaged Settings registry (id, label, tab, description, hint, configKey)."""
     try:
         data = json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1194,6 +1194,15 @@ def settings_registry() -> tuple[dict[str, Any], ...]:
         return ()
     entries = data.get("settings") if isinstance(data, dict) else None
     return tuple(e for e in entries or () if isinstance(e, dict) and isinstance(e.get("id"), str))
+
+
+def _help_text(entry: dict[str, Any]) -> str:
+    """All of a registry row's help, tip first: its ``hint`` (shown only behind
+    the row's info tip) then its ``description`` (shown on the row). Search and
+    the ``find_settings`` answer read both; the registry keeps them apart so a
+    reader that quotes on-row copy can take ``description`` alone."""
+    parts = (entry.get("hint"), entry.get("description"))
+    return " ".join(str(p) for p in parts if isinstance(p, str) and p)
 
 
 def _registry_entry(setting_id: str) -> dict[str, Any] | None:
@@ -1367,7 +1376,7 @@ def find_settings(query: str) -> list[dict[str, Any]]:
     hays = []
     for entry in entries:
         title = f"{entry['id']} {entry.get('label', '')}".lower()
-        hay = f"{title} {entry.get('description', '')} {entry.get('configKey', '')}".lower()
+        hay = f"{title} {_help_text(entry)} {entry.get('configKey', '')}".lower()
         hays.append((title, hay))
     # How many entries each word reaches: a tie goes to the entry whose words are
     # rarer, so "verbosity" outranks a "reply" that a dozen channel settings share.
@@ -1385,7 +1394,7 @@ def find_settings(query: str) -> list[dict[str, Any]]:
         row: dict[str, Any] = {
             "setting_id": entry["id"],
             "label": entry.get("label", ""),
-            "description": str(entry.get("description", ""))[:400],
+            "description": _help_text(entry)[:400],
             "tab": entry.get("tab", ""),
             "writable": False,
             "current_value": None,
@@ -1638,7 +1647,7 @@ def _token_hits(tokens: list[str], *texts: Any) -> int:
 
 def _row_hits(tokens: list[str], row: dict[str, Any]) -> int:
     entry = _registry_entry(row["setting_id"]) if row.get("setting_id") else None
-    extra = (entry.get("description"), entry.get("tab")) if entry else ()
+    extra = (_help_text(entry), entry.get("tab")) if entry else ()
     return _token_hits(tokens, row["key"], row.get("setting_id"), row.get("label"), *extra)
 
 
