@@ -520,6 +520,13 @@ prompt — and only with no project supplied does it fall back to three levels a
 the spec file (`<project>/.kiro/agents/foo.json` → `<project>`).
 `agent_skill_globs` is what the rest of the product asks.
 
+A glob is matched against every copy of a skill name. The catalog keeps one row
+per name, from the first skill root holding it, so when two roots hold the same
+name (a package manager's tree and `~/.kiro/skills`), a mapping naming the later
+root's copy still gets that copy (`_shadowed_copies` in
+`src/kiro_crew/skill_runtime/catalog.py`). When the mapping covers the first copy,
+that copy is the one served.
+
 When a builtin skill moves (`_RELOCATED_SKILLS` in `skills.py`), its old
 `SKILL.md` is set aside, so a mapping of the old path would load nothing.
 `agent.migrate_relocated_skill_uris` runs on every agent-config rebuild and
@@ -557,8 +564,17 @@ mapping, not the backend:
 |---|---|---|---|
 | `kirocrew` | none | whole catalog, injected by Crew | whole catalog, injected by Crew |
 | `kirocrew` | mapped | mapped set only, injected by Crew | mapped set only, injected by Crew |
-| custom | none | nothing — the agent brings its own | nothing |
+| custom | none | inherited skill trees, injected by Crew | nothing |
 | custom | mapped | mapped set only, injected by Crew | mapped set only, injected by Crew |
+
+The inherited trees are what kiro-cli gives a custom agent by default:
+`~/.kiro/skills` and the workspace's `.kiro/skills`
+(`agent_discovery.inherited_skill_globs`). Crew turns kiro-cli's own inheritance
+off on native launches to bound the startup catalog, so it supplies these trees
+itself, and the native view gets `skill_search` to load them. Claude Code
+lends no such trees, so a session there gets none. A workspace that
+sets `chat.disableInheritingDefaultResources` gets none, and so does an agent that
+excludes or disables `skill_search`.
 
 Every spec Kiro Crew generates for itself is a `custom` row, so a generated agent
 whose prompt names a skill must MAP that skill — the row above is why, and
