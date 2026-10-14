@@ -568,6 +568,15 @@ export interface ChatState {
   // menu, Cmd+W) reports it; the sidebar renders it. `historyWrite` is the
   // server's "still saving" refusal; anything else is a plain failed close.
   closeRefused: { key: string; title: string; reason: 'historyWrite' | 'failed' } | null
+  /** Row identities (`sessionRowIdentity`, i.e. `<instance_id>:<peer_key>`) of
+   *  ADOPTED remote-crew sessions the user has removed from THIS machine. Removing
+   *  such a row drops only the local binding; the session keeps running on its
+   *  peer, so the peer's own list still carries it and it would re-surface in the
+   *  merged sidebar as a peer row the moment the local slot is gone (#19958). We
+   *  suppress that row by identity until the peer's next list no longer contains
+   *  it (then the entry is cleared, so nothing is hidden forever). This never
+   *  closes or signals the remote session — it only hides a local duplicate. */
+  peerReleaseSuppressed: string[]
 }
 
 export const initialState: ChatState = {
@@ -650,4 +659,5 @@ export const initialState: ChatState = {
   endedTurn: {},
   pendingTurnSlot: null,
   closeRefused: null,
+  peerReleaseSuppressed: [],
 }

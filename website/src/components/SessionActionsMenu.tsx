@@ -65,10 +65,22 @@ export interface SessionActionsMenuProps {
    *  so on a phone, where this menu is the only close, nothing is cut off. */
   closeHint?: string
   /** Overrides the close item's label (default "Close session"). An adopted
-   *  remote-crew row passes "Release locally" here, because its ✕ releases only
-   *  this machine's copy — the session stays live on its peer — and the default
-   *  label would promise a durable close it never performs (#19958). */
+   *  remote-crew row passes "Remove from this machine" here, because its ✕ removes
+   *  only this machine's copy — the session stays live on its peer — and the
+   *  default label would promise a durable close it never performs (#19958). */
   closeLabel?: string
+  /** Render the close item in NEUTRAL colours instead of the destructive red.
+   *  Default false (a real close is destructive and reads red). An adopted
+   *  remote-crew row passes true: removing the local copy is NOT destructive —
+   *  the session keeps running on its peer — so the red danger styling would
+   *  signal an irreversible loss the action does not cause (#19958). */
+  closeNeutral?: boolean
+  /** An adopted remote-crew row's "Open on {crew}" item, shown as a SIBLING just
+   *  above the Remove item so the user can still reach the session on its peer
+   *  after removing the local copy (#19958). `onOpen` opens a window onto the
+   *  peer's own session. Omitted (no crew name resolved, or an ordinary row) hides
+   *  the item entirely — never a raw id. */
+  openOnCrew?: { label: string; onOpen: () => void }
   /** Extra items rendered in the top "informational" group (header-only today:
    *  the MCP-servers submenu). Generic so the shared menu stays surface-agnostic. */
   infoSlots?: React.ReactNode[]
@@ -133,7 +145,7 @@ export function collapseGroups<T>(groups: (T | false | null | undefined)[][]): T
  *   [close]          Close session
  */
 export default function SessionActionsMenu({
-  variant, slotKey, mode, onReveal, onRename, onAutoTitle, onOpenInNewTab, onDuplicate, closeHint, closeLabel, infoSlots, onColorPicked, sidebarOnScreen = false, omitPopout = false,
+  variant, slotKey, mode, onReveal, onRename, onAutoTitle, onOpenInNewTab, onDuplicate, closeHint, closeLabel, closeNeutral = false, openOnCrew, infoSlots, onColorPicked, sidebarOnScreen = false, omitPopout = false,
 }: SessionActionsMenuProps) {
   const Item = variant === 'context' ? ContextMenuItem : DropdownMenuItem
   const Separator = variant === 'context' ? ContextMenuSeparator : DropdownMenuSeparator
@@ -463,9 +475,19 @@ export default function SessionActionsMenu({
         )}
       </Item>,
     ],
-    // Close session — terminal, destructive
+    // Close session — terminal, destructive (red). An adopted remote-crew row
+    // passes closeNeutral: removing the local copy is reversible (the session
+    // stays live on its peer), so it renders in the menu's neutral colour.
     [
-      <Item key="close" className="text-danger focus:text-danger" onSelect={() => close(slotKey)}>
+      // "Open on {crew}" — a SIBLING of the Remove item, shown only on an adopted
+      // remote row where a crew name resolved. It opens a window onto the peer's
+      // own session, so the user can still reach it after removing the local copy.
+      ...(openOnCrew
+        ? [<Item key="open-on-crew" onSelect={() => openOnCrew.onOpen()}>
+            <ExternalLink size={13} /> {openOnCrew.label}
+          </Item>]
+        : []),
+      <Item key="close" className={closeNeutral ? undefined : 'text-danger focus:text-danger'} onSelect={() => close(slotKey)}>
         {closeHint ? (
           <>
             <X size={13} className="self-start mt-0.5 shrink-0" />

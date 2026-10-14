@@ -1,8 +1,8 @@
 /** Where the rendered rows come from: the caller's local tabs, live peer rows from
  *  connected crews, and the federated Older Sessions search. */
 import { useQuery } from '@tanstack/react-query'
-import { useMemo } from 'react'
-import { useAppSelector } from '../../store'
+import { useMemo, useEffect } from 'react'
+import { useAppSelector, useAppDispatch } from '../../store'
 import { useRemoteCrewChat } from '../../hooks/usePreviewFlag'
 import { api } from '../../api/client'
 import { crewGroupsFor, useInstanceSessions } from '../../hooks/useInstanceSessions'
@@ -11,6 +11,11 @@ import { useSelectInstance } from '../../hooks/useSelectInstance'
 import { useDebouncedSessionSearch } from './search'
 import type { Slot } from './types'
 import { sessionRowIdentity } from './rowIdentity'
+import { clearPeerReleaseSuppression } from '../../store/chatSlice'
+
+/** Stable empty fallback for the suppression set, so a store that omits the chat
+ *  slice does not hand `allRows` a fresh array each render and defeat its memo. */
+const EMPTY_SUPPRESSED: readonly string[] = []
 
 /** Every row this sidebar may show, and the federated Older Sessions search. */
 export function useSessionSources({ historyFilter, slotTitleDigest, localSlots }: {
@@ -27,6 +32,11 @@ export function useSessionSources({ historyFilter, slotTitleDigest, localSlots }
   // partial stores omit the instances slice entirely (unlike the instances-own
   // components, which only ever mount with it).
   const hasWarmInstances = useAppSelector(s => Object.keys(s.instances?.warm ?? {}).length > 0)
+  const dispatch = useAppDispatch()
+  // Identities suppressed after an adopted remote-crew row was removed here
+  // (#19958): hidden from the merged list until the peer stops listing them.
+  // Guarded read — partial test stores may omit the chat slice.
+  const peerReleaseSuppressed = useAppSelector(s => s.chat?.peerReleaseSuppressed ?? EMPTY_SUPPRESSED)
   // Live sessions on remote instances, grouped per crew by the sidebar.
   // The flag is read HERE and passed in, so a user who has not opted in issues no
   // per-instance request at all — this component mounts for every dashboard user,
@@ -143,12 +153,32 @@ export function useSessionSources({ historyFilter, slotTitleDigest, localSlots }
       // of that listing can be older than the binding.
       const local = localSlots as Slot[]
       const seen = new Set(local.map(sessionRowIdentity))
+      // Suppress a just-removed adopted row (#19958): its peer still lists the
+      // session, so without this it re-surfaces here as a peer row the instant the
+      // local slot is gone. Keyed by the identity the peer row shares; the entry is
+      // cleared once the peer stops listing it (the effect below).
+      const suppressed = new Set(peerReleaseSuppressed)
       const peers = (instanceSessions.rows as unknown as Slot[])
-        .filter(row => !seen.has(sessionRowIdentity(row)))
+        .filter(row => {
+          const id = sessionRowIdentity(row)
+          return !seen.has(id) && !suppressed.has(id)
+        })
       return peers.length === 0 ? local : [...local, ...peers]
     },
-    [localSlots, instanceSessions.rows],
+    [localSlots, instanceSessions.rows, peerReleaseSuppressed],
   )
+  // Forget a suppression entry once the peer's list no longer carries it: the
+  // session really ended on the peer, so there is nothing left to hide and
+  // keeping the entry would hide a future row that happens to resolve to the same
+  // identity. Driven by the peer rows refreshing (useInstanceSessions polls), so
+  // the clear lands on the first list that drops the session. Only runs while
+  // something is suppressed, and dispatches only when there is an entry to drop.
+  useEffect(() => {
+    if (peerReleaseSuppressed.length === 0) return
+    const present = new Set(instanceSessions.rows.map(row => sessionRowIdentity(row as unknown as Slot)))
+    const gone = peerReleaseSuppressed.filter(id => !present.has(id))
+    if (gone.length > 0) dispatch(clearPeerReleaseSuppression(gone))
+  }, [dispatch, peerReleaseSuppressed, instanceSessions.rows])
   // The UNFILTERED live slot list, every surface. `localSlots` is what the chat page
   // shows; this is what the gateway has. Read for one purpose -- `creatorAnchors`,
   // the conductor lane's missing creators -- and nowhere else: anything describing

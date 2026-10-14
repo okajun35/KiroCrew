@@ -118,19 +118,49 @@ describe('SessionActionsMenu', () => {
   })
 
   it('renders a custom closeLabel in place of "Close session", with and without a hint', () => {
-    // An adopted remote-crew row passes "Release locally": its ✕ releases only
-    // the local copy, so the default close label would misdescribe the action.
-    const { unmount } = setup({ closeLabel: 'Release locally' })
-    fireEvent.click(btn('Release locally'))
+    // An adopted remote-crew row passes "Remove from this machine": its ✕ removes
+    // only the local copy, so the default close label would misdescribe the action.
+    const { unmount } = setup({ closeLabel: 'Remove from this machine' })
+    fireEvent.click(btn('Remove from this machine'))
     expect(actions.close).toHaveBeenCalledWith('zzq-slot')
     expect(screen.queryByRole('button', { name: 'Close session' })).toBeNull()
     unmount()
 
     actions.close.mockReset()
-    setup({ closeLabel: 'Release locally', closeHint: 'Removes this copy. The session stays live on its crew.' })
-    expect(screen.getByTestId('close-item-hint').textContent).toBe('Removes this copy. The session stays live on its crew.')
-    fireEvent.click(btn(/Release locally/))
+    setup({ closeLabel: 'Remove from this machine', closeHint: 'It keeps running on nobita. You can still open it there.' })
+    expect(screen.getByTestId('close-item-hint').textContent).toBe('It keeps running on nobita. You can still open it there.')
+    fireEvent.click(btn(/Remove from this machine/))
     expect(actions.close).toHaveBeenCalledWith('zzq-slot')
+  })
+
+  it('renders the close item neutral (not destructive-red) when closeNeutral is set', () => {
+    // An adopted remote-crew row passes closeNeutral: removing the local copy is
+    // reversible (the session stays live on its peer), so the red danger styling
+    // of a real close would signal an irreversible loss it does not cause (#19958).
+    const { unmount } = setup({ closeLabel: 'Remove from this machine', closeNeutral: true })
+    const neutral = btn('Remove from this machine')
+    expect(neutral.className).not.toMatch(/text-danger/)
+    unmount()
+
+    // Default (a real close) stays red.
+    setup()
+    expect(btn('Close session').className).toMatch(/text-danger/)
+  })
+
+  it('shows an "Open on {crew}" sibling item that opens the peer, and omits it when no crew resolves', () => {
+    // An adopted remote-crew row whose crew name resolved passes openOnCrew: a
+    // sibling of Remove that reaches the session on its peer after the local copy
+    // is removed (#19958). No clickable control is nested inside the Remove item.
+    const onOpen = vi.fn()
+    const { unmount } = setup({ closeLabel: 'Remove from this machine', closeNeutral: true, openOnCrew: { label: 'Open on nobita', onOpen } })
+    fireEvent.click(btn('Open on nobita'))
+    expect(onOpen).toHaveBeenCalledTimes(1)
+    unmount()
+
+    // No crew name resolved (or an ordinary row): the item is absent entirely —
+    // never a raw id.
+    setup({ closeLabel: 'Remove from this machine', closeNeutral: true })
+    expect(screen.queryByRole('button', { name: /^Open on / })).toBeNull()
   })
 
   it('wires Reload session to the slot and disables it while a turn runs', () => {

@@ -681,6 +681,16 @@ export const deleteSlot = createAsyncThunk<
         // in-flight cap would otherwise expire a hold whose close succeeded.
         dispatch(confirmCloseHold({ key, requestId }))
         gcSessionStorage(key)
+        // The removed slot was an ADOPTED remote-crew session (a local binding to
+        // a session the peer owns): the close dropped only our binding, so the
+        // peer still lists it and it would re-surface as a peer row until the
+        // peer's listing catches up. Suppress that row by the identity the peer
+        // row shares (`row_identity` = `<instance_id>:<peer_key>`) until the
+        // peer's next list no longer carries it (sessionSources clears it then).
+        // Guarded on a real resolved identity; never signals the remote.
+        if (deletedSlot && deletedSlot.executor === 'remote' && deletedSlot.instance_id && deletedSlot.row_identity) {
+          dispatch(suppressPeerRelease(deletedSlot.row_identity))
+        }
       }
     } catch (err) {
       // Release the close hold BEFORE refetching: this thunk's `rejected` (which
@@ -851,6 +861,23 @@ const chatSlice = createSlice({
     setCloseRefused(state, action: PayloadAction<ChatState['closeRefused']>) {
       state.closeRefused = action.payload
     },
+    // An adopted remote-crew row was removed from this machine: suppress its
+    // identity so the peer row it unbinds from does not re-surface in the merged
+    // sidebar while the peer's listing is still stale (#19958). Idempotent — a
+    // repeat press must not stack duplicates.
+    suppressPeerRelease(state, action: PayloadAction<string>) {
+      if (action.payload && !state.peerReleaseSuppressed.includes(action.payload)) {
+        state.peerReleaseSuppressed.push(action.payload)
+      }
+    },
+    // Drop suppression entries the peer no longer lists (the session really ended
+    // there), so nothing stays hidden forever. The caller passes the identities
+    // to forget; a no-op when none match.
+    clearPeerReleaseSuppression(state, action: PayloadAction<string[]>) {
+      if (action.payload.length === 0) return
+      const drop = new Set(action.payload)
+      state.peerReleaseSuppressed = state.peerReleaseSuppressed.filter(id => !drop.has(id))
+    },
     ...runStateReducers,
     ...slotCacheReducers,
     ...composerCardReducers,
@@ -983,6 +1010,7 @@ const chatSlice = createSlice({
 
 export const {
   setCloseRefused,
+  suppressPeerRelease, clearPeerReleaseSuppression,
   setActiveSlot, clearSlotState, setPendingInput, stageToMainComposer, setAgentSwitchNotice, clearUnresumableResume, clearUndeletableHistory, setQuestionCard, clearQuestionCard, setQuestionDraft, setQuestionNotice, setQuestionRequestInFlight, markQuestionSettled, resolveQuestionCard, setFollowupCard, clearFollowupCard, dismissFollowupItem, setFolderSuggestion, clearFolderSuggestion, ageFolderSuggestion, appendMessage, appendSlotMessage, updateStreamingMessage, finalizeAssistant,
   removeThinking, confirmOptimisticSend, markSendUnconfirmed, resolveOptimisticSteer, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, settleStopNotRunning, startLocalTurn, startServerTurn, endLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, clearSlotCache, truncateAfterIndex, replaceMessages, hydrateSlotMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage, reorderQueuedMessages,
   sseContextUsage, setVoicePlaying, setVoicePreparing, setVoiceAudio,
