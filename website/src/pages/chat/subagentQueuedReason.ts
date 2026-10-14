@@ -15,7 +15,7 @@
  * kind ALSO resolves to `null` on purpose -- it is the ordinary wave shape and
  * the existing text already describes it.
  */
-import { fmtUnit } from '../../i18n/format'
+import { fmtDuration, fmtUnit, type FormatUnit } from '../../i18n/format'
 import { i18nT } from '../../i18n/t'
 import backendPhrases from '../../lib/backendPhrases.json'
 
@@ -42,6 +42,10 @@ export type SubagentQueuedReason = {
   available_gb?: number
   /** The bar that measurement fell short of, in GB (`low_memory` only). */
   required_gb?: number
+  /** How long the rows may wait for memory before they give up, in seconds:
+   *  the live `agent.subagent_queue_max_wait_secs`. `0` waits forever;
+   *  absent from an older gateway. Memory kinds only. */
+  max_wait_secs?: number
 }
 
 /** The `subagent_queued` WS payload: the count every gateway sends, plus the
@@ -52,6 +56,7 @@ export type SubagentQueuedEvent = {
   reason?: string
   available_gb?: number
   required_gb?: number
+  max_wait_secs?: number
 }
 
 const KIND_SET: ReadonlySet<string> = new Set<string>(KINDS)
@@ -68,10 +73,23 @@ export function parseSubagentQueuedReason(ev: SubagentQueuedEvent): SubagentQueu
   const required = finiteOrUndefined(ev.required_gb)
   if (available !== undefined) out.available_gb = available
   if (required !== undefined) out.required_gb = required
+  const maxWait = finiteOrUndefined(ev.max_wait_secs)
+  if (maxWait !== undefined && maxWait >= 0) out.max_wait_secs = Math.floor(maxWait)
   return out
 }
 
 const gb = (v: number): string => fmtUnit(v, 'gigabyte', { maximumFractionDigits: 1 })
+
+/** A whole-second bound in words, plural-aware through `Intl` (`30 minutes`,
+ *  `1 hour`, `1 hour, 30 minutes`); zero parts are dropped. */
+export function waitLimit(secs: number): string {
+  const parts: Array<[number, FormatUnit]> = [
+    [Math.floor(secs / 3600), 'hour'],
+    [Math.floor((secs % 3600) / 60), 'minute'],
+    [secs % 60, 'second'],
+  ]
+  return fmtDuration(parts, { dropZero: true, unitDisplay: 'long' })
+}
 
 /**
  * The sentence the chips show for a labelled wait, or `null` when the chip
@@ -87,16 +105,25 @@ const gb = (v: number): string => fmtUnit(v, 'gigabyte', { maximumFractionDigits
  * `{count} {text}`, which is the shape its existing default already has.
  */
 export function queuedWaitText(reason: SubagentQueuedReason | undefined): string | null {
+  // The give-up clause names the live bound; with none (`0`, or a gateway that
+  // does not send it) the sentence ends without one.
+  const bound = reason?.max_wait_secs
+  const limit = bound !== undefined && bound > 0 ? waitLimit(bound) : undefined
   switch (reason?.reason) {
     case 'low_memory':
-      return reason.required_gb !== undefined && reason.available_gb !== undefined
-        ? i18nT('pages.chat.subagentQueued.low_memory', {
-          required: gb(reason.required_gb),
-          available: gb(reason.available_gb),
-        })
+      if (reason.required_gb !== undefined && reason.available_gb !== undefined) {
+        const figures = { required: gb(reason.required_gb), available: gb(reason.available_gb) }
+        return limit !== undefined
+          ? i18nT('pages.chat.subagentQueued.low_memory_limit', { ...figures, limit })
+          : i18nT('pages.chat.subagentQueued.low_memory', figures)
+      }
+      return limit !== undefined
+        ? i18nT('pages.chat.subagentQueued.low_memory_no_figures_limit', { limit })
         : i18nT('pages.chat.subagentQueued.low_memory_no_figures')
     case 'memory_pressure':
-      return i18nT('pages.chat.subagentQueued.memory_pressure')
+      return limit !== undefined
+        ? i18nT('pages.chat.subagentQueued.memory_pressure_limit', { limit })
+        : i18nT('pages.chat.subagentQueued.memory_pressure')
     default:
       return null
   }

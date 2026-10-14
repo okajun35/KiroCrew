@@ -10874,6 +10874,7 @@
         "logs": "ログ",
         "no_issues_in_this_session_yet_mention_a_github_o": "このセッションにはまだイシューがありません。GitHub または GitLab のイシューリンクを言及すると、ここに表示されます。",
         "no_links_yet": "このセッションにはまだリンクがありません。チャットで URL を言及すると、ここに表示されます。",
+        "no_output_never_started": "（出力なし: 開始されませんでした）",
         "no_matches": "一致するものがありません",
         "no_pull_requests_yet": "このセッションにはまだプルリクエストがありません",
         "no_subagents_running": "実行中のサブエージェントはありません",
@@ -11300,8 +11301,11 @@
       },
       "subagentQueued": {
         "low_memory": "開始待ち — {{required}} の空きメモリが必要です（現在の空き {{available}}）。続行するにはメモリを空けてください",
+        "low_memory_limit": "開始待ち — {{required}} の空きメモリが必要です（現在の空き {{available}}）。続行するにはメモリを空けてください。{{limit}} 経過すると打ち切られます",
         "low_memory_no_figures": "開始待ち — 空きメモリが不足しています。続行するにはメモリを空けてください",
-        "memory_pressure": "開始待ち — macOS がメモリプレッシャーを報告しています。プレッシャーが下がるか、実行中のエージェントが終了すると自動的に再開します。プレッシャーが待機の上限を超えて続くと開始は打ち切られます"
+        "low_memory_no_figures_limit": "開始待ち — 空きメモリが不足しています。続行するにはメモリを空けてください。{{limit}} 経過すると打ち切られます",
+        "memory_pressure": "開始待ち — macOS がメモリプレッシャーを報告しています。プレッシャーが下がるか、実行中のエージェントが終了すると開始します",
+        "memory_pressure_limit": "開始待ち — macOS がメモリプレッシャーを報告しています。プレッシャーが下がるか、実行中のエージェントが終了すると開始します。{{limit}} 経過すると打ち切られます"
       },
       "subagentRunCard": {
         "agent_finished_other": "{{count}} 個のエージェントが完了",

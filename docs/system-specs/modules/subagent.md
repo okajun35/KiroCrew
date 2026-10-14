@@ -663,7 +663,7 @@ It keeps a start (`_memory_pressure_holds`) when, in addition:
   so a mixed wave's "finished" header cannot hide it and the retry is not read
   as automatic; the wave digest the parent reads says the same after its tally,
   "K of the ❌ never started", counting members whose error opens with
-  `QUEUED_WAIT_EXPIRED_TEXT` (a refusal is not counted, since resubmitting it
+  `NEVER_STARTED_MEMORY_PREFIX`, the opening words of both memory terminals (a refusal is not counted, since resubmitting it
   would only be refused again; a member the spent episode ended at once IS
   counted, so the line says to resubmit them "once memory eases", since a
   resubmit while that episode lasts is ended at once too), so the parent
@@ -1079,6 +1079,10 @@ made; no gate reads it back. Two consumers:
 - The advisory `subagent_queued` lifecycle event (`_emit_queue_depth`) carries
   `reason` and, for the low-memory kind, `available_gb` /
   `required_gb` beside `queued`; the memory-pressure kind carries no figures.
+  Both memory kinds also carry `max_wait_secs`, the live
+  `agent.subagent_queue_max_wait_secs` read as the frame is published
+  (`0` is no bound): the chip names it as the give-up time and drops
+  that clause at `0` or when the field is absent.
   The label is remembered per parent (`_queue_wait`) so the drain's,
   the claim path's, the cancel paths' and the terminal reports' requests —
   which carry no verdict of their own — keep it. A frame at depth 0 is the
@@ -2921,7 +2925,7 @@ Specified in [taskq.md](taskq.md); this section is the manager's side of it.
   spends eligible waiting for its re-check is not counted either. Live runs,
   accepts in flight and rows the pump has popped are excluded. Each failed row is reported
   through `_report_queued_stop(params, error=QUEUED_WAIT_EXPIRED_TEXT)`: the
-  queued-stop report with `never started: waiting for memory` as its `error`
+  queued-stop report with `never started: waiting for memory (not enough memory freed up in time); retry once memory frees up` as its `error`
   (outcome `failed`), so batch accounting, the digest and a waiting parent's wake
   are the stop's, and so is the depth: `_report_queued_stop` re-publishes the
   parent's queued depth itself, once per row and before the terminal record is
