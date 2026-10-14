@@ -30,27 +30,39 @@ export interface FileChangeEntry {
   turn_budget_chars?: number
   /** Why `content_omitted` holds. `older_turn`: the chat keeps copies only for
    *  its most recent file-changing turns, and this turn is older
-   *  (`transcript_merge.py::FILE_CHANGES_OLDER_TURN`). Absent: the turn
-   *  budget. */
+   *  (`transcript_merge.py::FILE_CHANGES_OLDER_TURN`). `unverified_write`: the
+   *  write failed and the file before it is unknown, so no diff is proven.
+   *  Absent: the turn budget. */
   omitted_reason?: string
 }
 
 const LEGACY_SNAPSHOT_LIMIT_CHARS = 200_000
 
 const OLDER_TURN = 'older_turn'
+/** A write tool reported `failed` and nothing recorded the file before it, so
+ *  no diff can be proven (`file_changes.py::_failed_write_entries`). */
+const UNVERIFIED_WRITE = 'unverified_write'
 
 const omittedContentSentence = (fc: FileChangeEntry) =>
   fc.omitted_reason === OLDER_TURN
     ? i18nT('components.fileChangeChips.diff_unavailable_older_turn')
-    : i18nT('components.fileChangeChips.diff_unavailable_turn_snapshot_budget', {
-        limit: fmtNumber(fc.turn_budget_chars ?? LEGACY_SNAPSHOT_LIMIT_CHARS * 2),
-      })
+    : fc.omitted_reason === UNVERIFIED_WRITE
+      ? i18nT('components.fileChangeChips.diff_unavailable_unverified_write')
+      : i18nT('components.fileChangeChips.diff_unavailable_turn_snapshot_budget', {
+          limit: fmtNumber(fc.turn_budget_chars ?? LEGACY_SNAPSHOT_LIMIT_CHARS * 2),
+        })
 
-/** The entry whose reason the card's one notice states. An older turn's
- *  sentence covers every row of the card, including a row the turn budget had
- *  already left without content, so it is preferred. */
-const noticeEntry = (fileChanges: FileChangeEntry[]) =>
-  fileChanges.find(fc => fc.omitted_reason === OLDER_TURN) ?? fileChanges.find(fc => fc.content_omitted)
+/** One entry per reason the card's notice states. An older turn's sentence
+ *  covers every row of the card, including a row the turn budget or a failed
+ *  write had already left without content, so it is said alone. Otherwise a
+ *  failed write and the turn budget are different facts, each said once. */
+const noticeEntries = (fileChanges: FileChangeEntry[]): FileChangeEntry[] => {
+  const older = fileChanges.find(fc => fc.omitted_reason === OLDER_TURN)
+  if (older) return [older]
+  const unverified = fileChanges.find(fc => fc.omitted_reason === UNVERIFIED_WRITE)
+  const budget = fileChanges.find(fc => fc.content_omitted && fc.omitted_reason !== UNVERIFIED_WRITE)
+  return [unverified, budget].filter((fc): fc is FileChangeEntry => fc !== undefined)
+}
 
 /* Three reasons a row carries no diff, and they are NOT the same sentence: one
  * file outgrew the per-file cap, the turn as a whole outgrew its budget and
@@ -560,8 +572,8 @@ function ExpandedList({ fileChanges, omittedFiles, onFileOpen, artifactPaths, di
   const stats = fileChanges.map(fc => fc.truncated ? { added: 0, removed: 0 } : countLines(fc.before, fc.after))
   const hasTruncatedSnapshot = fileChanges.some(fc => fc.truncated)
   const hasCompleteDiff = fileChanges.some(fc => !fc.truncated)
-  // The card says one reason once, for every row without content.
-  const demoted = noticeEntry(fileChanges)
+  // The card says each reason once, for every row without content.
+  const demoted = noticeEntries(fileChanges)
   const totalAdded = stats.reduce((s, x) => s + x.added, 0)
   const totalRemoved = stats.reduce((s, x) => s + x.removed, 0)
   const overflow = n > COLLAPSED_COUNT
@@ -598,7 +610,9 @@ function ExpandedList({ fileChanges, omittedFiles, onFileOpen, artifactPaths, di
             has no hover reveal, unlike DiffBlock's slotted controls. */}
         {hasCompleteDiff && <button onClick={() => setSideBySide(v => !v)} className={`ml-auto flex items-center justify-center w-[22px] h-[22px] rounded-md cursor-pointer transition-colors border-none shrink-0 ${sideBySide ? 'text-accent bg-accent-subtle' : 'text-muted hover:text-text hover:bg-bg-hover bg-transparent'}`} title={sideBySide ? i18nT('components.fileChangeChips.switch_to_unified_view') : i18nT('components.fileChangeChips.switch_to_split_view')} aria-label={sideBySide ? i18nT('components.fileChangeChips.switch_to_unified_view') : i18nT('components.fileChangeChips.switch_to_split_view')}><Columns2 size={13} /></button>}
       </div>
-      {demoted && <TurnBudgetNotice fc={demoted} canOpen={!!onFileOpen} className={NOTICE_ROW_CLASS} />}
+      {demoted.map((fc, i) => (
+        <TurnBudgetNotice key={fc.omitted_reason ?? 'budget'} fc={fc} canOpen={!!onFileOpen && i === demoted.length - 1} className={NOTICE_ROW_CLASS} />
+      ))}
       {omittedFiles > 0 && <OmittedFilesNotice count={omittedFiles} className={NOTICE_ROW_CLASS} />}
       <div className="flex flex-col">
         {fileChanges.slice(0, visibleCount).map((fc, i) => (
@@ -718,21 +732,23 @@ const FileChangeChips = memo(function FileChangeChips({ fileChanges, omittedFile
   const omitted = omittedFilesOf(omittedFiles)
   // Minimal keeps the wrapping pill row; anything else uses the grouped card.
   if (style === 'minimal') {
-    // The pill row says one reason once, for every pill without content.
-    const demoted = noticeEntry(fileChanges)
+    // The pill row says each reason once, for every pill without content.
+    const demoted = noticeEntries(fileChanges)
     return (
       <div className="ft-block-reveal flex flex-wrap items-center gap-1.5 mt-2 mb-1.5">
         {fileChanges.map(fc => (
           <MinimalChip
             key={fc.path}
             fc={fc}
-            named={!!demoted}
+            named={demoted.length > 0}
             onClick={fc.truncated
               ? () => onFileOpen?.(fc.path)
               : () => onOpenDiff?.(fc.path, fc.after, fc.before)}
           />
         ))}
-        {demoted && <TurnBudgetNotice fc={demoted} canOpen={!!onFileOpen} className={PILL_ROW_NOTICE_CLASS} />}
+        {demoted.map((fc, i) => (
+          <TurnBudgetNotice key={fc.omitted_reason ?? 'budget'} fc={fc} canOpen={!!onFileOpen && i === demoted.length - 1} className={PILL_ROW_NOTICE_CLASS} />
+        ))}
         {omitted > 0 && <OmittedFilesNotice count={omitted} className={PILL_ROW_NOTICE_CLASS} />}
       </div>
     )
