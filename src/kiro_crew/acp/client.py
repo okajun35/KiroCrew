@@ -127,7 +127,7 @@ from kiro_crew.acp.mcp_session_report import ERROR_CAP as MCP_REPORT_ERROR_CAP
 from kiro_crew.acp.mcp_session_report import NAME_CAP as MCP_REPORT_NAME_CAP
 from kiro_crew.acp.mcp_session_report import McpSessionReport, sanitize_sink_text
 from kiro_crew.acp.mcp_startable import PrunedServer, prune_unstartable
-from kiro_crew.acp.prompt_blocks import build_prompt_blocks
+from kiro_crew.acp.prompt_blocks import SentImageLedger, build_prompt_blocks
 from kiro_crew.acp.runtime_models import (
     DEFAULT_MODEL,
     _extract_advisory_detail,
@@ -2547,6 +2547,11 @@ class AcpClient:
         # _maybe_fire_post_tool_hooks.
         self._observed_tool_calls: dict[str, tuple[str, str]] = {}
         self._last_stop_reason: str = ""
+        # The pictures this client's current session already holds (see
+        # AcpSessionHandle), and the request id of the prompt whose inlined
+        # pictures are staged on it: only that prompt's answer commits them.
+        self._sent_images = SentImageLedger()
+        self._sent_images_req: int | None = None
         # Dynamic config from ACP session/new response and config_option_update notifications.
         # Only the effort configOptions are consumed (model lists come from
         # _capture_available_models, which parses the real dict-shaped `models`).
@@ -7527,6 +7532,9 @@ class AcpClient:
         # replacement process, so release it with the oracle it sampled into.
         self._retire_liveness_state()
         self._session_id = None
+        # The next session is opened (or reloaded) on a new process, and which
+        # pictures its conversation carries is not known here.
+        self._forget_sent_images()
         # The launches this record holds died with the process whose harness
         # started them (a backgrounded command or Workflow runs in that
         # process's own tree). Carrying it across a respawn would grant the
@@ -9708,6 +9716,12 @@ class AcpClient:
                 ):
                     self.last_prompt_stats.event_count -= 1
                     continue
+                if action == "complete" and req_id == getattr(self, "_sent_images_req", None):
+                    # The backend answered the prompt whose pictures were staged,
+                    # so its conversation now holds them.
+                    sent_images: SentImageLedger | None = getattr(self, "_sent_images", None)
+                    if sent_images is not None:
+                        sent_images.commit()
                 # Single yield chokepoint: everything downstream (dispatch,
                 # chat runner, a human answering an approval card) runs while
                 # this generator is suspended here, so the whole gap is
@@ -11225,20 +11239,28 @@ class AcpClient:
 
     # ── Private Helpers ──
 
+    def _forget_sent_images(self) -> None:
+        """The conversation has dropped the pictures it was sent (a completed
+        compaction summarized it, or the session is gone): a later prompt
+        naming one inlines it again."""
+        sent_images: SentImageLedger | None = getattr(self, "_sent_images", None)
+        if sent_images is not None:
+            sent_images.forget()
+
     async def _send_prompt(self, message: str, *, allow_image: bool = True) -> int:
         # Shared with AcpSessionHandle.prompt via prompt_blocks so the two paths
         # cannot drift.
-        return await self._send_request(
-            METHOD_PROMPT,
-            {
-                "sessionId": self._session_id,
-                # Offloaded: see the note in session_handle.prompt -- image
-                # reads and base64 encoding must not block the event loop.
-                "prompt": await asyncio.to_thread(
-                    build_prompt_blocks, message, allow_image=allow_image
-                ),
-            },
+        sent_images: SentImageLedger | None = getattr(self, "_sent_images", None)
+        # Offloaded: see the note in session_handle.prompt -- image reads and
+        # base64 encoding must not block the event loop.
+        blocks = await asyncio.to_thread(
+            build_prompt_blocks, message, allow_image=allow_image, sent_images=sent_images
         )
+        req_id = await self._send_request(
+            METHOD_PROMPT, {"sessionId": self._session_id, "prompt": blocks}
+        )
+        self._sent_images_req = req_id
+        return req_id
 
     async def _read_prompt_response(self, req_id: int, timeout: float) -> str:
         output: list[str] = []
@@ -12987,6 +13009,7 @@ class AcpClient:
         elif s_type == "completed":
             self._compaction_failed_at = None
             self.last_prompt_stats.reset_after_compaction()
+            self._forget_sent_images()
 
     def _claude_compaction_event(self, chunk: str) -> AcpEvent | None:
         """Reclassify a claude-agent-acp compaction notice chunk as an event.
@@ -13028,6 +13051,7 @@ class AcpClient:
         if status_type == "completed":
             self._compaction_failed_at = None
             self.last_prompt_stats.reset_after_compaction()
+            self._forget_sent_images()
         elif status_type == "failed":
             logger.warning("Compaction failed (claude): %s", detail or "no reason reported")
             # Arm the bounded post-failure wait, exactly as the kiro-cli path
@@ -13094,6 +13118,7 @@ class AcpClient:
         if status_type == "completed":
             self._compaction_failed_at = None
             self.last_prompt_stats.reset_after_compaction()
+            self._forget_sent_images()
         # No title: the adapter ships no summary with either frame, and an empty
         # string is what every consumer already renders for "compacted, no
         # summary offered".
@@ -13188,6 +13213,7 @@ class AcpClient:
         logger.info("Compaction status (claude): completed (synthesized at turn end)")
         self._compaction_failed_at = None
         self.last_prompt_stats.reset_after_compaction()
+        self._forget_sent_images()
         # ``synthesized`` marks this terminal as manufactured at the turn's end
         # rather than observed mid-turn. It arrives AFTER every text chunk of the
         # turn, so a consumer that treats a compaction terminal as a segment
