@@ -2748,3 +2748,79 @@ describe('PierreWorkspaceTreeImpl — expansion persistence', () => {
     ])
   })
 })
+
+describe('PierreWorkspaceTreeImpl — folders past the row cap', () => {
+  const cut = () => mkTree({
+    paths: ['README.md'],
+    directories: ['big'],
+    truncated: true,
+    truncatedDirectories: ['big'],
+  })
+  const bigListing = (): TreePayload => ({
+    root: ROOT,
+    dir: 'big',
+    paths: ['big/late/leaf.ts'],
+    directories: ['big/late'],
+    repo: false,
+    truncated: false,
+    truncatedDirectories: [],
+  })
+  const answer = () => vi.mocked(api.projectTree).mockImplementation(async (_p, dir) => (dir === 'big' ? bigListing() : cut()))
+
+  it('loads a cut folder on its own when it is expanded, and feeds its rows to the model', async () => {
+    answer()
+    renderTree()
+    await waitForTree()
+    const model = treeMock.last()
+    expect(api.projectTree).not.toHaveBeenCalledWith(ROOT, 'big')
+    act(() => {
+      model.simulateExpanded(['big'])
+      model.simulateVisibleRows([{ kind: 'directory', path: 'big/', isExpanded: true }])
+    })
+    await waitFor(() => expect(api.projectTree).toHaveBeenCalledWith(ROOT, 'big'))
+    await waitFor(() => expect(model.calls.resetPaths.at(-1)).toContain('big/late/leaf.ts'))
+  })
+
+  it('loads a cut folder opened through its chain row, and keeps it open once split', async () => {
+    vi.mocked(api.projectTree).mockImplementation(async (_p, dir) => (dir === 'big'
+      ? bigListing()
+      : mkTree({ paths: ['big/core/a.ts'], directories: ['big', 'big/core'], truncated: true, truncatedDirectories: ['big'] })))
+    renderTree()
+    await waitForTree()
+    const model = treeMock.last()
+    act(() => {
+      model.simulateExpanded(['big/core'])
+      model.simulateVisibleRows([{ kind: 'directory', path: 'big/core/', isExpanded: true }])
+    })
+    await waitFor(() => expect(api.projectTree).toHaveBeenCalledWith(ROOT, 'big'))
+    await waitFor(() => expect(model.calls.expand).toContain('big'))
+  })
+
+  it('loads and expands a folder a host reveals', async () => {
+    answer()
+    const { update } = renderTree()
+    await waitForTree()
+    const model = treeMock.last()
+    update({ reveal: { path: 'big', nonce: 1 } })
+    await waitFor(() => expect(api.projectTree).toHaveBeenCalledWith(ROOT, 'big'))
+    await waitFor(() => expect(model.calls.focusPath).toContain('big/'))
+    expect(model.calls.expand).toContain('big')
+  })
+
+  it('hands the cut folder to the host when its limit row is selected', async () => {
+    vi.mocked(api.projectTree).mockResolvedValue(mkTree({
+      paths: ['README.md'],
+      directories: ['big'],
+      truncated: true,
+      truncatedDirectories: ['big'],
+    }))
+    const onSearchFolder = vi.fn()
+    renderTree({ onSearchFolder })
+    await waitForTree()
+    const model = treeMock.last()
+    const row = model.calls.resetPaths.at(-1)!.find(p => p.startsWith('big/') && p.endsWith(M))!
+    expect(row).toContain('search this folder')
+    act(() => model.simulateSelection(row))
+    expect(onSearchFolder).toHaveBeenCalledWith('big')
+  })
+})

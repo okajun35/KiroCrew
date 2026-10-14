@@ -11,7 +11,7 @@
  */
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { GitStatus, GitStatusEntry } from '@pierre/trees'
 // The package root re-exports the tree's context-menu types under shorter
 // names; alias them back to the render-signature names for local clarity.
@@ -41,9 +41,10 @@ import { isUntokenizableDirPath } from '../utils/dropClassify'
 import { errMessage } from '../utils/thunkError'
 import { PIERRE_TREE_STATE_ROW_CSS } from './config'
 import { recallExpandedPaths, rememberExpandedPaths } from './treeExpansionMemory'
-import { planTreeStateRows, stateRowsMatchingFilter, STATE_ROW_DECORATION, type TreeStateRowLabels } from './treeStateRows'
+import { planTreeStateRows, stateRowsMatchingFilter, STATE_ROW_ACTION_DECORATION, STATE_ROW_DECORATION, type TreeStateRowLabels } from './treeStateRows'
 import { recallDismissedUnreadable, rememberDismissedUnreadable } from './treeUnreadableDismissals'
-import { TreeSkeleton } from './tree'
+import { TreeSkeleton, type TreeReveal } from './tree'
+import { mergeFolderListings, withFolder, type FolderListing } from './treeFolderListings'
 
 /** The kind vocabulary the composer's `@`-mention plumbing speaks: a file is
  *  staged + tokenized, a folder becomes a bare `@rel/` reference. Narrower than
@@ -418,7 +419,7 @@ function dedupeTreePaths(paths: string[]): string[] {
   return unique.filter(path => path.endsWith('/') || !directories.has(path))
 }
 
-export function PierreWorkspaceTreeImpl({ projectDir, onFileOpen, onAddToContext, searchQuery, mode = 'all', selectedPath, persistExpansion = false }: {
+export function PierreWorkspaceTreeImpl({ projectDir, onFileOpen, onAddToContext, searchQuery, mode = 'all', selectedPath, persistExpansion = false, onSearchFolder, reveal }: {
   projectDir: string
   onFileOpen?: (absPath: string) => void
   /** Right-click "Add to context" on a row: hands the host the ABSOLUTE path
@@ -442,6 +443,11 @@ export function PierreWorkspaceTreeImpl({ projectDir, onFileOpen, onAddToContext
    *  hosts of this shared tree keep their collapsed-by-default behavior.
    *  Applies to `all` mode only: `changed` mode starts fully open by design. */
   persistExpansion?: boolean
+  /** Activating the "not shown: limit reached" row under a folder hands that
+   *  project-relative folder to the host, which scopes its search to it. */
+  onSearchFolder?: (folder: string) => void
+  /** Load (if it is past the row cap) and expand one project-relative folder. */
+  reveal?: TreeReveal | null
 }) {
   // Whether any app contributes a 'tree-context' row at all — gates whether the
   // tree wires a context menu (per-node `when` filtering happens in the menu).
@@ -451,7 +457,7 @@ export function PierreWorkspaceTreeImpl({ projectDir, onFileOpen, onAddToContext
   // inside it would unmount with the thing that raised it.
   const [actionError, setActionError] = useState<string | null>(null)
   const qc = useQueryClient()
-  const { data: tree } = useQuery({
+  const { data: baseTree } = useQuery({
     queryKey: ['project-tree', projectDir],
     queryFn: () => api.projectTree(projectDir),
     enabled: !!projectDir,
@@ -472,10 +478,53 @@ export function PierreWorkspaceTreeImpl({ projectDir, onFileOpen, onAddToContext
   const { data: status, error: statusError } = useQuery({
     queryKey: ['git-status', projectDir],
     queryFn: () => api.projectGitStatus(projectDir),
-    enabled: !!projectDir && (mode === 'changed' || !!tree?.repo),
+    enabled: !!projectDir && (mode === 'changed' || !!baseTree?.repo),
     refetchInterval: 5_000,
     refetchOnWindowFocus: true,
   })
+  // Folders past the whole listing's row cap that this mount has asked for on
+  // their own (`?dir=`): a cut folder the user expands, or one a host
+  // reveals. Keyed under the tree's own key, so the host's Refresh -- which
+  // refetches `['project-tree', projectDir]` -- re-reads them too, and polled
+  // with it. Bounded (`withFolder`), so the merged path list stays bounded.
+  const [loadedFolders, setLoadedFolders] = useState<string[]>([])
+  const folderQueries = useQueries({
+    queries: (mode === 'all' ? loadedFolders : []).map(folder => ({
+      queryKey: ['project-tree', projectDir, 'dir', folder],
+      queryFn: () => api.projectTree(projectDir, folder) as Promise<FolderListing>,
+      enabled: !!projectDir,
+      retry: false,
+      refetchInterval: 10_000,
+      staleTime: 10_000,
+    })),
+  })
+  const folderListings = folderQueries.flatMap(q => (q.data ? [q.data] : []))
+  const folderListingsKey = folderQueries.map(q => q.dataUpdatedAt).join(',')
+  const tree = useMemo(
+    () => (baseTree ? mergeFolderListings(baseTree, folderListings) : baseTree),
+    // `folderListings` is rebuilt every render; its update stamps are its identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [baseTree, folderListingsKey],
+  )
+  const loadFolder = useCallback((folder: string) => {
+    if (!folder) return
+    setLoadedFolders(prev => (prev.includes(folder) ? prev : withFolder(prev, folder)))
+  }, [])
+  // Child folder rows of each CUT folder, for the lazy load below: a chain row
+  // reports the expansion of its last folder only. Built for the cut folders
+  // alone, so it stays small however large the listing is.
+  const childDirectoriesRef = useRef<Map<string, string[]>>(new Map())
+  childDirectoriesRef.current = useMemo(() => {
+    const cut = new Set((tree?.truncatedDirectories ?? []).filter(Boolean))
+    const map = new Map<string, string[]>()
+    if (cut.size === 0) return map
+    for (const raw of tree?.directories ?? []) {
+      const dir = raw.replace(/\/$/, '')
+      const parent = dir.slice(0, Math.max(0, dir.lastIndexOf('/')))
+      if (cut.has(parent)) map.set(parent, [...(map.get(parent) ?? []), dir])
+    }
+    return map
+  }, [tree])
   const truncatedDirectoriesRef = useRef<Set<string>>(new Set())
   truncatedDirectoriesRef.current = new Set(tree?.truncatedDirectories ?? [])
   const truncatedDirectoriesKey = (tree?.truncatedDirectories ?? []).join('\n')
@@ -637,7 +686,7 @@ export function PierreWorkspaceTreeImpl({ projectDir, onFileOpen, onAddToContext
   const rowEmpty = i18nT('components.workspaceTree.row_empty')
   const rowHiddenOnly = i18nT('components.workspaceTree.row_hidden_only')
   const rowLinked = i18nT('components.workspaceTree.row_linked')
-  const rowTruncated = i18nT('components.workspaceTree.row_truncated')
+  const rowTruncated = i18nT(onSearchFolder ? 'components.workspaceTree.row_truncated_search' : 'components.workspaceTree.row_truncated')
   const stateRowLabels = useMemo<TreeStateRowLabels>(
     () => ({
       empty: rowEmpty,
@@ -652,6 +701,17 @@ export function PierreWorkspaceTreeImpl({ projectDir, onFileOpen, onAddToContext
   // all three read them from callbacks Pierre holds.
   const stateRowsRef = useRef<ReadonlySet<string>>(NO_STATE_ROWS)
   const stateRowFoldersRef = useRef<ReadonlySet<string>>(NO_STATE_ROWS)
+  // The folder a `truncated` state row's activation searches, or null for a row
+  // that is not that action: the planner names a childless folder truncated
+  // whenever the payload cuts it, and the row is an action only where the host
+  // scopes a search (`onSearchFolder`). Read from Pierre callbacks, so refs.
+  const onSearchFolderRef = useRef(onSearchFolder)
+  onSearchFolderRef.current = onSearchFolder
+  const searchableStateRow = (rowPath: string): string | null => {
+    if (!onSearchFolderRef.current) return null
+    const folder = rowPath.slice(0, Math.max(0, rowPath.lastIndexOf('/')))
+    return folder && truncatedDirectoriesRef.current.has(folder) ? folder : null
+  }
 
   // Rows can be dragged into the composer only where the host can take a
   // mention (it wires "Add to chat") and on a fine pointer: a touch long-press
@@ -689,7 +749,9 @@ export function PierreWorkspaceTreeImpl({ projectDir, onFileOpen, onAddToContext
       // (`./config`). Decided by the plan, the same Set the selection and
       // context-menu guards read -- never by the path's marker suffix, which a
       // real file can share: that file keeps its icon, its pointer and its open.
-      if (item.kind !== 'directory' && stateRowsRef.current.has(item.path)) return STATE_ROW_DECORATION
+      if (item.kind !== 'directory' && stateRowsRef.current.has(item.path)) {
+        return searchableStateRow(item.path) ? STATE_ROW_ACTION_DECORATION : STATE_ROW_DECORATION
+      }
       if (item.kind !== 'directory') return null
       const path = item.path.replace(/\/$/, '')
       // A folder the server could not read: the failure behind
@@ -1009,7 +1071,11 @@ export function PierreWorkspaceTreeImpl({ projectDir, onFileOpen, onAddToContext
       // chosen. Deselecting notifies again; that turn finds no selection and
       // returns above.
       if (stateRowsRef.current.has(focused.getPath())) {
+        // The `truncated` row under a folder the cap still cuts is the one
+        // state row with a job: it scopes the host's search to that folder.
+        const folder = searchableStateRow(focused.getPath())
         focused.deselect()
+        if (folder) onSearchFolderRef.current?.(folder)
         return
       }
       const abs = `${root}/${focused.getPath()}`
@@ -1020,6 +1086,74 @@ export function PierreWorkspaceTreeImpl({ projectDir, onFileOpen, onAddToContext
     })
     return unsubscribe
   }, [model, root])
+
+  // Lazy per-folder loading. The whole listing stops at its row cap
+  // and names the folders the cut reached; expanding one of those asks for its
+  // own listing, which the merge above folds into the rendered tree. The root
+  // (`""`) is never a row to expand -- the host's search reaches past it.
+  useEffect(() => {
+    if (mode !== 'all') return
+    // Nothing to watch on a whole listing: no subscription at all.
+    if (![...truncatedDirectoriesRef.current].some(Boolean)) return
+    const isOpen = (path: string) => {
+      const item = model.getItem(path) as { isExpanded?: () => boolean } | null
+      return !!item && typeof item.isExpanded === 'function' && item.isExpanded()
+    }
+    const check = () => {
+      // `flattenEmptyDirectories` folds a cut folder holding one listed subfolder
+      // into a chain row (`packages / core`) whose expansion is its LAST folder's,
+      // so a cut folder also counts as open when a folder beneath it is.
+      const children = childDirectoriesRef.current
+      for (const folder of truncatedDirectoriesRef.current) {
+        if (!folder) continue
+        if (isOpen(folder)) loadFolder(folder)
+        else if ((children.get(folder) ?? []).some(isOpen)) {
+          // Opened through its chain row: once its own listing splits the
+          // chain, the folder itself must stay open, or the rows it brought
+          // land under a collapsed folder.
+          loadFolder(folder)
+          setPendingExpand(prev => (prev.includes(folder) ? prev : [...prev, folder]))
+        }
+      }
+    }
+    check()
+    return model.subscribe(check)
+  }, [model, mode, loadFolder, truncatedDirectoriesKey])
+
+  // A host's reveal: load the folder (a folder past the cap is no row until its
+  // own listing lands -- the listing's paths then imply it and its ancestors)
+  // and, once it is a row, expand the chain down to it and focus it.
+  const [pendingReveal, setPendingReveal] = useState<string | null>(null)
+  const [pendingExpand, setPendingExpand] = useState<string[]>([])
+  useLayoutEffect(() => {
+    if (pendingExpand.length === 0 || !ready) return
+    const loaded = new Set(folderListings.map(listing => listing.dir))
+    const waiting: string[] = []
+    for (const folder of pendingExpand) {
+      if (!loaded.has(folder)) { waiting.push(folder); continue }
+      const dir = model.getItem(folder)
+      if (dir && 'expand' in dir && typeof dir.expand === 'function') dir.expand()
+    }
+    if (waiting.length !== pendingExpand.length) setPendingExpand(waiting)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingExpand, ready, pathsKey, model, folderListingsKey])
+  useEffect(() => {
+    if (!reveal?.path || mode !== 'all') return
+    const folder = reveal.path.replace(/\/$/, '')
+    loadFolder(folder)
+    setPendingReveal(folder)
+  }, [reveal, mode, loadFolder])
+  useLayoutEffect(() => {
+    if (!pendingReveal || !ready) return
+    if (!model.getItem(pendingReveal)) return
+    const segments = pendingReveal.split('/')
+    for (let i = 1; i <= segments.length; i++) {
+      const dir = model.getItem(segments.slice(0, i).join('/'))
+      if (dir && 'expand' in dir && typeof dir.expand === 'function') dir.expand()
+    }
+    model.focusPath(`${pendingReveal}/`)
+    setPendingReveal(null)
+  }, [pendingReveal, ready, pathsKey, model])
 
   // Row context menu. Ref-backed so the callback identity stays stable across
   // handler/prop changes (Pierre re-reads it only when the menu opens) while

@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useDebouncedValue } from '../../apps/file-explorer/hooks'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { Files, Diff, Search, X, RefreshCw, FileText } from 'lucide-react'
+import { Files, Diff, Search, X, RefreshCw, FileText, Folder } from 'lucide-react'
 import { api } from '../../api/client'
 import { fileGrep, type FileGrepHit } from '../../api/fileGrep'
 import ErrorNotice from '../../components/ErrorNotice'
@@ -18,10 +18,11 @@ import {
   RETRYABLE_SEARCH_CAUSES,
   searchErrorCause,
   TREE_FAILURE_KEYS,
+  type SearchErrorCause,
 } from '../../lib/searchErrorCause'
 import { cn } from '../../lib/utils'
 import { useColumnResize } from '../../hooks/useColumnResize'
-import { PierreWorkspaceTree } from '../../pierre/tree'
+import { PierreWorkspaceTree, type TreeReveal } from '../../pierre/tree'
 import { findReport, reportForError } from '../../utils/errorReport'
 import { errMessage } from '../../utils/thunkError'
 
@@ -54,6 +55,24 @@ const CONTENT_MIN_CHARS = 2
  *  filter is local and instant; a content search is a bounded walk on the
  *  gateway, so it waits for the typing to settle. */
 const CONTENT_DEBOUNCE_MS = 250
+
+/** Shortest name query the filename search answers (`api_file_search`). */
+const NAME_SEARCH_MIN_CHARS = 2
+
+/** Keystroke debounce before a filename search past the tree's cap leaves the browser. */
+const NAME_SEARCH_DEBOUNCE_MS = 200
+
+/** Rows one filename search past the cap asks for: enough to find a folder by a
+ *  partial name, and well under the server's own ceiling. */
+const NAME_SEARCH_LIMIT = 50
+
+/** The folder panel's search copy, reused: the same search, the same causes. */
+const NAME_SEARCH_FAILURE_KEYS: Record<SearchErrorCause, string> = {
+  timed_out: 'pages.chat.folderPanel.search_timed_out',
+  failed: 'pages.chat.folderPanel.search_failed',
+  denied: 'pages.chat.folderPanel.search_denied',
+  root_missing: 'pages.chat.folderPanel.search_root_missing',
+}
 
 /** Filter text for the current page session, keyed by project directory.
  *  Module-level like `sessionChangedMode` (and deliberately NOT localStorage:
@@ -317,6 +336,101 @@ function ContentResults({ query, projectDir, onOpen }: {
 }
 
 /**
+ * Filename search past the tree's row cap. The tree's own filter can
+ * only find the rows the tree holds, and a truncated tree does not hold every
+ * folder, so while the payload is cut -- or while the search is scoped to one
+ * folder the cap still cuts -- the query goes to `/api/file-search`, which walks
+ * the project (or that folder) under its own budget. A folder hit reveals that
+ * folder in the tree (loading its own listing when it is past the cap); a file
+ * hit opens the file.
+ */
+function NameSearchResults({ query, searchRoot, projectRoot, onOpenFile, onRevealFolder }: {
+  query: string
+  /** Absolute directory the search walks: the project, or one folder of it. */
+  searchRoot: string
+  /** Absolute project root, which folder hits are made relative to. */
+  projectRoot: string
+  onOpenFile: (absPath: string) => void
+  onRevealFolder: (relPath: string) => void
+}) {
+  const { t } = useTranslation()
+  const settled = useDebouncedValue(query, NAME_SEARCH_DEBOUNCE_MS).trim()
+  const enabled = settled.length >= NAME_SEARCH_MIN_CHARS
+  const { data, isFetching, error } = useQuery({
+    queryKey: ['rail-name-search', searchRoot, settled],
+    queryFn: ({ signal }) => api.fileSearch(settled, searchRoot, signal, undefined, NAME_SEARCH_LIMIT),
+    enabled,
+    retry: false,
+    staleTime: 10_000,
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey?.[1] === searchRoot ? previous : undefined,
+  })
+  const results = data?.results ?? []
+  // A hit's project-relative path, from the search's own root when the
+  // server resolved one (it answers with the real path it walked).
+  const relative = (path: string): string | null => {
+    for (const root of [projectRoot, data?.root]) {
+      if (root && path.startsWith(`${root.replace(/[/\\]+$/, '')}/`)) return path.slice(root.replace(/[/\\]+$/, '').length + 1)
+    }
+    return null
+  }
+  return (
+    <div className="flex flex-col min-h-0 flex-1" data-testid="rail-name-search">
+      <div className="px-2 pb-1 text-[10.5px] text-muted shrink-0">
+        {t('pages.chat.folderPanel.search_beyond_tree')}
+      </div>
+      {error && (
+        <div className="px-2 pb-1.5 shrink-0">
+          <ErrorNotice
+            variant="inline"
+            className="whitespace-normal"
+            message={failureMessage(t, NAME_SEARCH_FAILURE_KEYS, searchErrorCause(error))}
+            report={reportForError(error)}
+            askAgent
+            testId="rail-name-search-error"
+          />
+        </div>
+      )}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {!enabled || (isFetching && results.length === 0) ? (
+          <div role="status" className="px-2 py-2 text-[11.5px] text-muted">
+            {t('pages.chat.folderPanel.searching')}
+          </div>
+        ) : !error && results.length === 0 ? (
+          <EmptyState icon={<Search size={20} />} title={t('pages.chat.fileBrowserRail.content_no_matches')} />
+        ) : (
+          results.map(hit => {
+            const rel = relative(hit.path)
+            const isDir = hit.kind === 'dir'
+            return (
+              <Clickable
+                key={hit.path}
+                className="flex items-center gap-1 w-full text-left px-2 py-1 rounded-md hover:bg-bg-hover cursor-pointer text-[11.5px] text-text"
+                title={hit.path}
+                onClick={() => {
+                  if (!isDir) onOpenFile(hit.path)
+                  else if (rel) onRevealFolder(rel)
+                }}
+              >
+                {isDir
+                  ? <Folder size={11} className="shrink-0 opacity-60" />
+                  : <FileText size={11} className="shrink-0 opacity-60" />}
+                <span className="truncate">{rel ?? hit.path}</span>
+              </Clickable>
+            )
+          })
+        )}
+        {results.length >= NAME_SEARCH_LIMIT && (
+          <div className="px-2 py-1.5 text-[10.5px] text-muted/80">
+            {t('pages.chat.folderPanel.showing_first_matches', { shown: NAME_SEARCH_LIMIT })}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
  * The file-browser rail: resize grip + tree column, headed by ONE row — an
  * icons-only All/Changed segment (tooltips carry the labels, Changed shows a
  * live count) with an always-open search field filling the rest — and a
@@ -372,6 +486,17 @@ export default function FileBrowserRail({ projectDir, onFileOpen, onAddToContext
     rememberQuery(projectDir, v)
     _setQuery(v)
   }
+  // The folder a "Search this folder" row scoped the name search to, and the
+  // folder a search hit asked the tree to reveal. Both belong to one project.
+  const [searchFolder, setSearchFolder] = useState<string | null>(null)
+  const [reveal, setReveal] = useState<TreeReveal | null>(null)
+  const [scopeDir, setScopeDir] = useState(projectDir)
+  if (scopeDir !== projectDir) {
+    setScopeDir(projectDir)
+    setSearchFolder(null)
+    setReveal(null)
+  }
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   const { isError: treeError, error: treeErr, data: treeData } = useTreeQuery(projectDir)
   const { data: status, error: statusError } = useQuery({
@@ -445,6 +570,13 @@ export default function FileBrowserRail({ projectDir, onFileOpen, onAddToContext
        on ? 'bg-bg text-text shadow-[0_0_0_1px_var(--border)]' : 'bg-transparent text-muted hover:text-text')
 
   const contentMode = searchMode === 'content'
+  // The tree filter finds only what the tree holds. Past its cap, or scoped to
+  // one folder, the name query goes to the filename search instead.
+  const treeTruncated = treeData?.truncated === true
+  const nameSearchScoped = !contentMode && !changedMode && searchFolder != null
+  const nameSearch = !contentMode && !changedMode && (treeTruncated || nameSearchScoped)
+    && query.trim().length >= NAME_SEARCH_MIN_CHARS
+  const projectRoot = (treeData?.root ?? projectDir).replace(/[/\\]+$/, '')
   // The tree notice belongs only to the body the `['project-tree']` read backs. Changed
   // mode lists `['git-status']` (PierreWorkspaceTreeImpl: `ready = mode === 'changed'
   // ? status != null : tree != null`) and Content mode lists grep hits, so a failed
@@ -517,6 +649,7 @@ export default function FileBrowserRail({ projectDir, onFileOpen, onAddToContext
           <div className="flex flex-1 min-w-0 items-center gap-1.5 h-[26px] px-2 bg-bg-elevated border border-border focus-within:border-accent rounded-[7px] transition-colors">
             <Search size={12} className="text-muted shrink-0" />
             <input
+              ref={searchInputRef}
               value={query}
               onChange={e => setQuery(e.target.value)}
               onKeyDown={e => { if (e.key === 'Escape') setQuery('') }}
@@ -599,6 +732,22 @@ export default function FileBrowserRail({ projectDir, onFileOpen, onAddToContext
             </button>
           </div>
         </div>
+        {nameSearchScoped && (
+          <div className="flex items-center gap-1.5 px-2 pt-1.5 shrink-0 text-[11px] text-muted" data-testid="rail-search-folder-scope">
+            <Folder size={11} className="shrink-0 opacity-60" />
+            <span className="truncate" title={searchFolder ?? undefined}>
+              {t('pages.chat.fileBrowserRail.search_in_folder', { folder: searchFolder })}
+            </span>
+            <button
+              onClick={() => setSearchFolder(null)}
+              className="flex items-center justify-center w-[18px] h-[18px] rounded cursor-pointer text-muted hover:text-text bg-transparent border-none shrink-0"
+              aria-label={t('pages.chat.fileBrowserRail.search_whole_project')}
+              title={t('pages.chat.fileBrowserRail.search_whole_project')}
+            >
+              <X size={11} />
+            </button>
+          </div>
+        )}
         {/* In All mode, a failed status read must still explain why the Changed
             count is unavailable. In Changed mode the Pierre tree owns this same
             query failure and renders the one-sentence notice plus its structured
@@ -673,15 +822,40 @@ export default function FileBrowserRail({ projectDir, onFileOpen, onAddToContext
             // header Refresh refetches the same key, and a success clears `treeError`.
             null
           ) : (
-            <PierreWorkspaceTree
-              mode={changedMode ? 'changed' : 'all'}
-              projectDir={projectDir}
-              persistExpansion
-              onFileOpen={(abs) => onFileOpen(abs, changedMode)}
-              onAddToContext={onAddToContext}
-              searchQuery={query || null}
-              selectedPath={selectedPath ?? null}
-            />
+            <>
+              {nameSearch && (
+                <NameSearchResults
+                  query={query}
+                  searchRoot={searchFolder ? `${projectRoot}/${searchFolder}` : projectRoot}
+                  projectRoot={projectRoot}
+                  onOpenFile={abs => onFileOpen(abs, false)}
+                  onRevealFolder={rel => {
+                    setQuery('')
+                    setSearchFolder(null)
+                    setReveal(prev => ({ path: rel, nonce: (prev?.nonce ?? 0) + 1 }))
+                  }}
+                />
+              )}
+              {/* Kept mounted behind the search: its model holds the folders the
+                  user expanded and the folder listings it loaded past the cap. */}
+              <div className={cn('flex-1 min-h-0 flex flex-col', nameSearch && 'hidden')}>
+                <PierreWorkspaceTree
+                  mode={changedMode ? 'changed' : 'all'}
+                  projectDir={projectDir}
+                  persistExpansion
+                  onFileOpen={(abs) => onFileOpen(abs, changedMode)}
+                  onAddToContext={onAddToContext}
+                  searchQuery={nameSearch || nameSearchScoped ? null : query || null}
+                  selectedPath={selectedPath ?? null}
+                  onSearchFolder={folder => {
+                    setSearchFolder(folder)
+                    setQuery('')
+                    searchInputRef.current?.focus()
+                  }}
+                  reveal={reveal}
+                />
+              </div>
+            </>
           )}
         </div>
       </div>

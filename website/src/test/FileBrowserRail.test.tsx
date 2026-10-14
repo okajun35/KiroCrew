@@ -23,6 +23,7 @@ const H = vi.hoisted(() => ({
   api: {
     projectTree: vi.fn(),
     projectGitStatus: vi.fn(),
+    fileSearch: vi.fn(),
   },
   fileGrep: vi.fn(),
 }))
@@ -39,17 +40,25 @@ vi.mock('../pierre/tree', () => ({
     searchQuery?: string | null
     selectedPath?: string | null
     onFileOpen?: (abs: string) => void
+    onSearchFolder?: (folder: string) => void
+    reveal?: { path: string; nonce: number } | null
   }) => (
-    <button
-      data-testid="tree"
-      data-mode={p.mode}
-      data-dir={p.projectDir}
-      data-query={p.searchQuery ?? ''}
-      data-selected={p.selectedPath ?? ''}
-      onClick={() => p.onFileOpen?.(H.OPENED)}
-    >
-      tree
-    </button>
+    <>
+      <button
+        data-testid="tree"
+        data-mode={p.mode}
+        data-dir={p.projectDir}
+        data-query={p.searchQuery ?? ''}
+        data-selected={p.selectedPath ?? ''}
+        data-reveal={p.reveal?.path ?? ''}
+        onClick={() => p.onFileOpen?.(H.OPENED)}
+      >
+        tree
+      </button>
+      <button data-testid="tree-search-folder" onClick={() => p.onSearchFolder?.('big/cut')}>
+        search folder
+      </button>
+    </>
   ),
 }))
 
@@ -81,6 +90,7 @@ beforeEach(() => {
   localStorage.clear()
   H.api.projectTree.mockReset().mockResolvedValue({ root: DIR, paths: [], repo: true })
   H.api.projectGitStatus.mockReset().mockResolvedValue({ repo: true, files: [] })
+  H.api.fileSearch.mockReset().mockResolvedValue({ results: [], root: DIR })
   H.fileGrep.mockReset().mockResolvedValue({
     results: [], truncated: false, engine: 'rg', skipped_docs: 0, root: DIR,
   })
@@ -1112,5 +1122,52 @@ describe('FileBrowserRail content results', () => {
     expect(prompt).toContain('/api/file-grep')
     expect(prompt).toContain('403')
     expect(prompt).toContain('sensitive_path')
+  })
+})
+
+
+describe('FileBrowserRail past the tree row cap', () => {
+  const truncatedTree = { root: DIR, paths: ['a.txt'], directories: ['big'], repo: false, truncated: true, truncatedDirectories: ['big'] }
+
+  it('keeps a whole tree on the local filter', async () => {
+    mount()
+    fireEvent.change(screen.getByLabelText('Filter files…'), { target: { value: 'late' } })
+    await waitFor(() => expect(tree().dataset.query).toBe('late'))
+    // The search results are never mounted for a whole tree, so no search can be sent.
+    expect(screen.queryByTestId('rail-name-search')).toBeNull()
+    expect(H.api.fileSearch).not.toHaveBeenCalled()
+  })
+
+  it('sends the filter to the filename search and reveals a folder hit', async () => {
+    H.api.projectTree.mockResolvedValue(truncatedTree)
+    H.api.fileSearch.mockResolvedValue({
+      root: DIR,
+      results: [
+        { path: `${DIR}/big/late`, name: 'late', size: 0, mtime: 0, kind: 'dir' },
+        { path: `${DIR}/big/late/x.ts`, name: 'x.ts', size: 0, mtime: 0, kind: 'file' },
+      ],
+    })
+    const { onFileOpen } = mount()
+    await waitFor(() => expect(H.api.projectTree).toHaveBeenCalled())
+    fireEvent.change(screen.getByLabelText('Filter files…'), { target: { value: 'late' } })
+    await waitFor(() => expect(H.api.fileSearch).toHaveBeenCalledWith('late', DIR, expect.anything(), undefined, 50))
+    const results = await screen.findByTestId('rail-name-search')
+    fireEvent.click(await within(results).findByText('big/late/x.ts'))
+    expect(onFileOpen).toHaveBeenCalledWith(`${DIR}/big/late/x.ts`, false)
+    fireEvent.click(within(results).getByText('big/late'))
+    await waitFor(() => expect(tree().dataset.reveal).toBe('big/late'))
+    expect((screen.getByLabelText('Filter files…') as HTMLInputElement).value).toBe('')
+  })
+
+  it('scopes the search to the folder a cut row names', async () => {
+    H.api.projectTree.mockResolvedValue(truncatedTree)
+    mount()
+    await waitFor(() => expect(H.api.projectTree).toHaveBeenCalled())
+    fireEvent.click(screen.getByTestId('tree-search-folder'))
+    expect(await screen.findByTestId('rail-search-folder-scope')).toHaveTextContent('big/cut')
+    fireEvent.change(screen.getByLabelText('Filter files…'), { target: { value: 'zz' } })
+    await waitFor(() => expect(H.api.fileSearch).toHaveBeenCalledWith('zz', `${DIR}/big/cut`, expect.anything(), undefined, 50))
+    fireEvent.click(screen.getByLabelText('Search the whole project'))
+    expect(screen.queryByTestId('rail-search-folder-scope')).toBeNull()
   })
 })
