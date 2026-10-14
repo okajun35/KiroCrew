@@ -184,6 +184,23 @@ Three structural facts explain most of the rest:
   plus a slow hosted pickup). The poll never reruns a lane, for the reason
   given above: a rerun holds every group queued behind the failing one, and a
   build depth beyond ~40 does not shorten the queue.
+- **A red macOS leg on main pages the PR's author.** Those two legs are the
+  only test runs no merge group proves, and GitHub's own failure e-mail goes
+  to the push actor, which for a queued merge is the queue.
+  `main-macos-failure-watch.yml` runs on `workflow_run: completed` of `CI`
+  and `Build`; for a push to `main` that ended `failure` or `timed_out` with a
+  job on a `macos-*` runner red, it reads the squash commit's trailing `(#N)`,
+  comments on PR #N tagging its author with the failed job names and the run
+  URL, and opens (or bumps, at most once per 6 hours) one fixed-title
+  `<workflow> macOS leg is failing on main` issue under the
+  `main-macos-failure` label, assigned to that author. A cancelled push run is
+  not a red (the per-ref group evicts pending runs by design), and a red that
+  names no macOS job writes nothing, since the PR and the merge group already
+  ran every other leg. Dedupe and the close window follow the scheduled
+  watcher (below). It holds `actions: read`, `issues: write` and
+  `pull-requests: read`, never checks out code, and
+  `test/test_main_macos_failure_watch.py` pins the names, the gate and the
+  paging with `gh` stubbed.
 - **Do not merge a feature PR past a non-green `PR Readiness`.** The ruleset's
   bypass actors can, and a `pending` readiness is not a judgement about a red
   lane: it skips lanes that have not reported yet. #11947 merged 14 s after its
