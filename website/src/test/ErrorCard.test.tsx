@@ -1,6 +1,14 @@
-import { describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { QueryClient, QueryClientProvider, onlineManager } from '@tanstack/react-query'
+import type { ReactElement } from 'react'
 
+// The copy control's outcome is decided by the clipboard helper; stub it so
+// the tests pin what the card paints for each answer.
+const clipboard = vi.hoisted(() => ({ copyCode: vi.fn<(text: string) => Promise<boolean>>() }))
+vi.mock('../utils/clipboard', async (importOriginal) => ({ ...(await importOriginal<object>()), ...clipboard }))
+
+import { ApiError } from '../api/apiError'
 import { ErrorCard, isAuthRequired, isCapabilitiesChanged, isContextOverflow, isModelUnentitled, isSessionStartFailed, isTurnTimeout, isUsageLimit, retryProse, sessionStartFailureStreak } from '../pages/chat/ErrorCard'
 import type { ChatMessage } from '../types'
 import { FEATURE_REQUEST_FORM_URL } from '../prompts/featureRequest'
@@ -405,6 +413,97 @@ describe('ErrorCard — a session start that failed twice in a row', () => {
     render(<ErrorCard content={prose} meta={{ kind: 'session_start_failed' }} onContinue={() => undefined} />)
     expect(screen.getByTestId('error-card-continue')).toBeInTheDocument()
     expect(screen.queryByTestId('error-card-session-start-repeat-hint')).toBeNull()
+    expect(screen.queryByTestId('error-card-restart-gateway')).toBeNull()
+  })
+
+  describe('the restart command chip can be copied (#13791)', () => {
+    afterEach(() => { clipboard.copyCode.mockReset() })
+    const copyButton = () => within(screen.getByTestId('error-card-restart-command-copy')).getByRole('button')
+
+    it('uses the shared copy control and copies the exact command', async () => {
+      clipboard.copyCode.mockResolvedValue(true)
+      render(<ErrorCard content={prose} meta={{ kind: 'session_start_failed' }} sessionStartRepeat />)
+      expect(copyButton()).toHaveAccessibleName(i18nT('components.settingRef.copyCommand'))
+      fireEvent.click(copyButton())
+      await waitFor(() => expect(copyButton()).toHaveAccessibleName(i18nT('components.settingRef.copied')))
+      expect(clipboard.copyCode).toHaveBeenCalledWith('kirocrew restart')
+    })
+
+    it('reports a dead clipboard instead of painting a tick', async () => {
+      clipboard.copyCode.mockResolvedValue(false)
+      render(<ErrorCard content={prose} meta={{ kind: 'session_start_failed' }} sessionStartRepeat />)
+      fireEvent.click(copyButton())
+      await waitFor(() => expect(copyButton()).toHaveAccessibleName(i18nT('components.settingRef.copyFailed')))
+    })
+  })
+
+  describe('the in-card restart action (#13791)', () => {
+    afterEach(() => { onlineManager.setOnline(true) })
+    const withClient = (ui: ReactElement) =>
+      render(<QueryClientProvider client={new QueryClient({ defaultOptions: { mutations: { retry: false } } })}>{ui}</QueryClientProvider>)
+    const renderRepeat = (onRestartGateway: () => Promise<unknown>) =>
+      withClient(<ErrorCard content={prose} meta={{ kind: 'session_start_failed' }} sessionStartRepeat onRestartGateway={onRestartGateway} />)
+    const button = () => screen.getByTestId('error-card-restart-gateway')
+    // The shared RestartGatewayButton arms on the first press and fires on the second.
+    const armAndConfirm = () => { fireEvent.click(button()); fireEvent.click(button()) }
+
+    it('offers the shared restart button in place of the terminal hint, keeping the diagnostic and withholding Resume', () => {
+      renderRepeat(() => Promise.resolve())
+      const card = screen.getByTestId('error-card')
+      expect(card).toHaveTextContent(prose)
+      expect(screen.getByTestId('error-card-session-start-restart-hint')).toHaveTextContent(i18nT('pages.chat.errorCard.session_start_repeat_restart_hint'))
+      expect(button()).toHaveTextContent(i18nT('pages.settings.aboutPanel.restart_gateway'))
+      expect(screen.queryByTestId('error-card-session-start-repeat-hint')).toBeNull()
+      expect(screen.queryByTestId('error-card-continue')).toBeNull()
+    })
+
+    it('the first press only arms, because a restart stops every running chat', () => {
+      const restart = vi.fn(() => Promise.resolve())
+      renderRepeat(restart)
+      fireEvent.click(button())
+      expect(button()).toHaveTextContent(i18nT('pages.settings.aboutPanel.restart_confirm'))
+      expect(restart).not.toHaveBeenCalled()
+    })
+
+    it('restarts once on the second press and then says the page reconnects, with no second button', async () => {
+      const restart = vi.fn(() => Promise.resolve({ ok: true, status: 'restarting' }))
+      renderRepeat(restart)
+      armAndConfirm()
+      expect(await screen.findByTestId('error-card-restarting')).toHaveTextContent(i18nT('pages.chat.errorCard.restart_gateway_restarting'))
+      expect(restart).toHaveBeenCalledTimes(1)
+      expect(screen.queryByTestId('error-card-restart-gateway')).toBeNull()
+    })
+
+    it('treats a dropped connection as the restart under way, not a failure', async () => {
+      renderRepeat(() => Promise.reject(new TypeError('Failed to fetch')))
+      armAndConfirm()
+      expect(await screen.findByTestId('error-card-restarting')).toBeInTheDocument()
+      expect(screen.queryByTestId('error-card-restart-failed')).toBeNull()
+    })
+
+    it('while offline it waits instead of claiming a restart it never sent', async () => {
+      onlineManager.setOnline(false)
+      const restart = vi.fn(() => Promise.resolve())
+      const { unmount } = renderRepeat(restart)
+      armAndConfirm()
+      await waitFor(() => expect(button()).toBeDisabled())
+      expect(restart).not.toHaveBeenCalled()
+      expect(screen.queryByTestId('error-card-restarting')).toBeNull()
+      // Unmount before going back online, so the resumed mutation settles
+      // against no mounted card rather than outside act().
+      unmount()
+    })
+
+    it('shows a server refusal through ErrorNotice and brings back the terminal hint, keeping the button', async () => {
+      renderRepeat(() => Promise.reject(new ApiError(403, 'Only the owner can restart the gateway.')))
+      armAndConfirm()
+      const notice = await screen.findByTestId('error-card-restart-failed')
+      expect(notice).toHaveTextContent('Only the owner can restart the gateway.')
+      expect(notice).toHaveAttribute('role', 'alert')
+      expect(screen.getByTestId('error-card-session-start-repeat-hint')).toHaveTextContent('kirocrew restart')
+      expect(button()).toBeEnabled()
+      expect(screen.queryByTestId('error-card-restarting')).toBeNull()
+    })
   })
 })
 

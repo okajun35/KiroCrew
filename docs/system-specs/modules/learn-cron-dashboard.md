@@ -4187,7 +4187,20 @@ only, at the same count, `transcriptRenderers` withholds `onContinue` and sets
 plus one hint line (`pages.chat.errorCard.session_start_repeat_hint`) at body
 weight with the command as a `<code>` chip — it is the card's only remaining
 next step, so it is not a muted footnote; an older start-failure row is settled
-history and renders as plain prose. Pinned by `test_chat_slot_continue.py::TestSessionStartFailureStreak` /
+history and renders as plain prose. On the chat page (not an embed or popout,
+which cannot drive the gateway) the host also passes `onRestartGateway`, and the
+card swaps that hint for `session_start_repeat_restart_hint` (which says a
+restart stops every running chat) plus the shared `RestartGatewayButton`
+(`components/RestartGatewayButton.tsx`, the same two-step armed control
+Settings → About and the speech settings render) (#13791). The second press
+runs a `useMutation` over `api.restartGateway()` (`POST /api/restart`,
+owner-gated on the server), so an offline browser leaves it paused and pending
+rather than claiming a restart; the card then shows a restarting line with the
+button gone. A bare network failure after the POST counts as the restart under
+way (the process image is replaced); only an `ApiError` (for example a
+non-owner viewer) is shown, through `ErrorNotice` with the agent hand-off, and
+the terminal hint comes back under it. Wherever the terminal hint renders, the
+command chip carries the shared `settingRef/CopyCommandButton`. Pinned by `test_chat_slot_continue.py::TestSessionStartFailureStreak` /
 `::TestChatSlotContinueAfterRepeatedStartFailures`,
 `test_chat_runner_coverage.py::TestSessionStartFailureRowKind`, and the
 frontend `ErrorCard.test.tsx` / `transcriptRenderers.test.tsx` suites. Not done

@@ -11029,7 +11029,10 @@
         "open_capabilities": "打开 Customize",
         "fresh_session": "开始新会话",
         "fresh_session_hint": "这个聊天和其中的截图仍留在屏幕上；助手会从文字摘要继续，而不是重新读取图片。",
-        "fresh_session_done": "已就绪。请在下方输入下一条消息；助手会从本次聊天的文字摘要继续。"
+        "fresh_session_done": "已就绪。请在下方输入下一条消息；助手会从本次聊天的文字摘要继续。",
+        "session_start_repeat_restart_hint": "重启网关即可解决。此对话已连续两次启动失败，继续只会以同样的方式失败。重启会停止所有正在运行的对话。",
+        "restart_gateway_restarting": "正在重启网关。网关恢复后此页面会重新连接，届时请重新发送消息。",
+        "restart_gateway_failed": "网关未能重启。"
       },
       "folderPanel": {
         "clear_search": "清除搜索",

@@ -11190,7 +11190,10 @@
         "open_capabilities": "Customize öffnen",
         "fresh_session": "Neue Sitzung starten",
         "fresh_session_hint": "Behält diesen Chat und seine Screenshots auf dem Bildschirm; der Assistent macht mit einer Textzusammenfassung weiter, statt die Bilder erneut zu lesen.",
-        "fresh_session_done": "Bereit. Gib unten deine nächste Nachricht ein; der Assistent macht mit einer Textzusammenfassung dieses Chats weiter."
+        "fresh_session_done": "Bereit. Gib unten deine nächste Nachricht ein; der Assistent macht mit einer Textzusammenfassung dieses Chats weiter.",
+        "session_start_repeat_restart_hint": "Starte das Gateway neu, um das zu beheben. Dieser Chat konnte zweimal hintereinander nicht starten, daher würde Fortsetzen genauso scheitern. Ein Neustart beendet alle laufenden Chats.",
+        "restart_gateway_restarting": "Das Gateway wird neu gestartet. Diese Seite verbindet sich wieder, sobald es zurück ist; sende deine Nachricht dann erneut.",
+        "restart_gateway_failed": "Das Gateway wurde nicht neu gestartet."
       },
       "folderPanel": {
         "clear_search": "Suche löschen",

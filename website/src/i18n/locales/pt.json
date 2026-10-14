@@ -11351,7 +11351,10 @@
         "open_capabilities": "Abrir Customize",
         "fresh_session": "Iniciar uma nova sessão",
         "fresh_session_hint": "Mantém este chat e suas capturas de tela na tela; o assistente segue a partir de um resumo em texto em vez de reler as imagens.",
-        "fresh_session_done": "Pronto. Digite sua próxima mensagem abaixo; o assistente segue a partir de um resumo em texto deste chat."
+        "fresh_session_done": "Pronto. Digite sua próxima mensagem abaixo; o assistente segue a partir de um resumo em texto deste chat.",
+        "session_start_repeat_restart_hint": "Reinicie o gateway para resolver. Este chat não conseguiu iniciar duas vezes seguidas, então retomar só falharia do mesmo jeito. Reiniciar interrompe todos os chats em andamento.",
+        "restart_gateway_restarting": "Reiniciando o gateway. Esta página se reconecta quando ele voltar; depois, envie sua mensagem novamente.",
+        "restart_gateway_failed": "O gateway não reiniciou."
       },
       "folderPanel": {
         "clear_search": "Limpar pesquisa",

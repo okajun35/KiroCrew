@@ -470,6 +470,10 @@ function ComposerDraftSync({ store, inputRef, onCommit }: {
   return null
 }
 
+/** The repeat-session-start card's restart (#13791). Module scope so the
+ *  transcript renderers' memo never sees a new identity. */
+const restartGatewayFromError = (): Promise<unknown> => api.restartGateway()
+
 export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync }: { mode?: string; embedded?: boolean; embedMode?: 'chat' | 'sessions'; popout?: boolean; noUrlSync?: boolean } = {}) {
   const dispatch = useAppDispatch()
   const moveSlotToFolder = useMoveSlotToFolder()
@@ -4570,6 +4574,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       onOpenDefaultModel: embedded || popout ? undefined : openDefaultModelSetting,
       onOpenSignIn: embedded || popout ? undefined : openKiroSignIn,
       onOpenTurnLimit: embedded || popout ? undefined : openTurnLimitSetting,
+      // The repeat-start remedy (#13791). The restart itself is owner-gated on
+      // the server; a refusal comes back as an ApiError the card shows.
+      onRestartGateway: embedded || popout ? undefined : restartGatewayFromError,
       onOpenCapabilities: embedded || popout ? undefined : openMemberCapabilities,
       onFreshSession: handleFreshSession,
       freshSession,
