@@ -417,6 +417,45 @@ def test_no_rate_is_said_so() -> None:
     assert lines[1].startswith("  cpu:         ⏹ could not take a rate")
 
 
+def test_unowned_runtimes_show_their_memory() -> None:
+    """``_acp_runtime_lines`` names the total RSS of untracked/stale runtimes.
+
+    Untracked runtimes accumulate silently; each tree holds roughly 1-1.5 GiB.
+    Without a memory figure the doctor row gives no clue that a pile-up can
+    exhaust the host and stop dependent services. This test pins the behaviour
+    introduced to surface it.
+
+    Reader: test/test_doctor_acp_runtimes.py
+    """
+    # Two unowned runtimes: 1.2 GiB untracked + 0.8 GiB stale = 2.0 GiB total.
+    r1 = resources._AcpRuntime(
+        10, "untracked", cpu_pct=1.0, age_secs=3600.0, rss_bytes=1_200 * 1024 * 1024
+    )
+    r2 = resources._AcpRuntime(
+        20, "stale", cpu_pct=0.5, age_secs=7200.0, rss_bytes=800 * 1024 * 1024
+    )
+    lines = resources._acp_runtime_lines(resources._AcpCensus([r1, r2]), 1.0)
+    full = "\n".join(lines)
+    assert "  no owner:" in full
+    # Memory total is present.
+    assert "MiB" in full or "GiB" in full
+    # The dashboard reclaim path is named.
+    assert "Leaked Runtimes" in full or "Services" in full
+
+
+def test_unowned_runtimes_without_rss_do_not_show_a_memory_line() -> None:
+    """When ``rss_bytes`` is ``None`` the memory line is silently absent.
+
+    The census omits ``rss_bytes`` when the page size is unavailable; the rows
+    must not raise or emit a placeholder.
+
+    Reader: test/test_doctor_acp_runtimes.py
+    """
+    r = resources._AcpRuntime(10, "untracked", cpu_pct=1.0, age_secs=3600.0, rss_bytes=None)
+    lines = resources._acp_runtime_lines(resources._AcpCensus([r]), 1.0)
+    assert not any("MiB" in ln or "GiB" in ln for ln in lines)
+
+
 # ── The section ───────────────────────────────────────────────────────────────
 
 
