@@ -72,6 +72,8 @@ import {
   poseDataUri,
   resolvePoseBg,
   seedIconPose,
+  seedIconBg as seedIconBgFromName,
+  ICON_BG_PALETTE,
 } from '../lib/avatarPoses'
 import CrewAvatarLibraryTab from './CrewAvatarLibraryTab'
 import ErrorNotice from './ErrorNotice'
@@ -223,13 +225,6 @@ const TILE_LABEL_KEYS: Record<string, string> = {
 
 const pickRandom = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
 
-/** ICON tier: the background colours offered as swatches. Brand purple first
- *  (the art's own shipped colour), then the ghost tile palette — a set already
- *  chosen for separation and for keeping a white silhouette legible (every
- *  entry is held below L* 78, see `kiroGhostAvatar`). Reusing it means the two
- *  tiers cannot drift apart on which colours read well behind the ghost. */
-const ICON_BG_OPTIONS = [BRAND_PURPLE, ...TILES]
-
 /**
  * The theme's own accent colour as `#rrggbb`, or null when it cannot be read as
  * one (SSR, jsdom, a theme whose `--accent` is a non-hex form). Read live off
@@ -251,10 +246,15 @@ function themeAccentHex(): string | null {
   }
 }
 
-/** The background a fresh icon draft starts on: the active theme's accent when
- *  it reads as a hex, else the art's shipped purple. Seeding from the theme is
- *  the point — the first thing the user sees already matches their dashboard. */
-function seedIconBg(): string {
+/** The background a fresh icon draft starts on. When a name is present (the
+ *  create flow) it follows the name, exactly as the pose does, so the editor
+ *  opens on the SAME colour the create tile previewed — an un-picked Apply then
+ *  saves the icon the user was looking at. With no name (editing an existing
+ *  crew) it falls back to the active theme's accent when that reads as a hex,
+ *  else the art's shipped purple. */
+function seedIconBg(name?: string): string {
+  const seeded = (name ?? '').trim()
+  if (seeded) return seedIconBgFromName(seeded)
   return themeAccentHex() ?? DEFAULT_POSE_BG
 }
 
@@ -432,17 +432,24 @@ export default function CrewAvatarBuilder({
   const [axis, setAxis] = useState<Axis>('eyes')
   const [tier, setTier] = useState<Tier>(tierOf(value))
   const [pane, setPane] = useState<Pane>(tierOf(value))
+  // Whether the crew ALREADY wears a ghost face when the editor opens. New ghost
+  // authoring is removed (issue #18616), so the Ghost face / Reactions tabs are
+  // offered only for such a pre-existing crew — and keyed off the STORED
+  // record, not the live tier, so visiting another tier and coming back does
+  // not strand an existing ghost crew away from its own face.
+  const wearsGhost = useMemo(() => tierOf(value) === 'face', [value])
   /** The pack the draft wears, or null. A pack override is nothing BUT this id,
    *  so the Library pane needs no draft of its own. */
   const [packId, setPackId] = useState<string | null>(value?.kind === 'pack' ? value.id : null)
   /** The ICON draft: which pose, and the background colour behind it. Seeded
-   *  from the stored icon record when editing one, else the default pose on a
-   *  theme-derived background — so a fresh crew opens on a face that already
-   *  matches the dashboard. Held even while another tier is selected (like the
+   *  from the stored icon record when editing one, else the name-seeded pose
+   *  and colour (both follow the name) — so the editor opens on the SAME icon
+   *  the create tile previewed; with no name it falls back to a theme-accent
+   *  background. Held even while another tier is selected (like the
    *  ghost draft), so a trip through another tab never discards it. */
   const [iconPose, setIconPose] = useState<string>(value?.kind === 'icon' ? value.pose : seedIconPose(name))
   const [iconBg, setIconBg] = useState<string>(
-    value?.kind === 'icon' ? resolvePoseBg(value.bg) : seedIconBg(),
+    value?.kind === 'icon' ? resolvePoseBg(value.bg) : seedIconBg(name),
   )
   // Any pose, swatch or colour pick sets this, so the seeded pose itself is
   // a pick like any other once the user chooses it.
@@ -485,7 +492,9 @@ export default function CrewAvatarBuilder({
       setPane(tierOf(value))
       setPackId(value?.kind === 'pack' ? value.id : null)
       setIconPose(value?.kind === 'icon' ? value.pose : seedIconPose(name))
-      setIconBg(value?.kind === 'icon' ? resolvePoseBg(value.bg) : seedIconBg())
+      setIconBg(
+        value?.kind === 'icon' ? resolvePoseBg(value.bg) : seedIconBg(name),
+      )
       setIconTouched(false)
       setMotions(value?.kind === 'ghost' ? (value.motions ?? {}) : {})
       setSounds(value?.kind === 'ghost' ? (value.sounds ?? {}) : {})
@@ -494,7 +503,7 @@ export default function CrewAvatarBuilder({
       setDragOver(false)
       pickGen.current += 1
     }
-  }, [open, value, name])
+  }, [open, value, name, iconOnly])
 
   // While the Picture pane is showing, a file dropped ANYWHERE but the small
   // dashed zone (the preview image above it, the dialog body, the page) would
@@ -839,11 +848,22 @@ export default function CrewAvatarBuilder({
                   label: t('components.avatarBuilder.mode_icon'),
                   icon: <LayoutGrid size={13} aria-hidden="true" />,
                 },
-                {
-                  key: 'face',
-                  label: t('components.avatarBuilder.mode_face'),
-                  icon: <Ghost size={13} aria-hidden="true" />,
-                },
+                // Ghost face is NO LONGER authorable: a new, icon, picture or
+                // pack avatar cannot switch TO the 捏脸 builder (issue #18616).
+                // It is shown ONLY when the crew already wears a ghost face, so
+                // an existing ghost mate can still see and tweak its own face —
+                // the record, its readers and rendering are untouched, so every
+                // ghost avatar keeps working; only the entry point for NEW ghost
+                // authoring is gone.
+                ...(wearsGhost
+                  ? [
+                      {
+                        key: 'face',
+                        label: t('components.avatarBuilder.mode_face'),
+                        icon: <Ghost size={13} aria-hidden="true" />,
+                      },
+                    ]
+                  : []),
                 {
                   key: 'picture',
                   label: t('components.avatarBuilder.mode_picture'),
@@ -893,14 +913,10 @@ export default function CrewAvatarBuilder({
                   background, mirroring the Face pane's layout so switching tiers
                   does not jump the dialog's shape. */}
               <div className="flex w-full flex-col items-center gap-3 md:w-[200px] md:flex-none">
-                {/* The icon-only door, before any pick: preview the face the
-                    card shows (the name's own), so opening the editor never
-                    looks like it already changed the picture. */}
-                {iconUntouched ? (
-                  <span className="flex" data-testid="avatar-icon-preview-current">
-                    <CrewAvatar seed={name} size={176} className="!rounded-xl border border-border" />
-                  </span>
-                ) : (
+                {/* The icon-only door previews the seeded ICON (pose over the
+                    seeded colour) the card shows, both before and after a pick,
+                    so opening the editor never shows the trait ghost the icon
+                    tier replaced. */}
                 <img
                   src={poseDataUri(iconPose, iconBg)}
                   alt=""
@@ -908,9 +924,8 @@ export default function CrewAvatarBuilder({
                   width={176}
                   height={176}
                   className="rounded-xl border border-border"
-                  data-testid="avatar-icon-preview"
+                  data-testid={iconUntouched ? 'avatar-icon-preview-current' : 'avatar-icon-preview'}
                 />
-                )}
                 {/* Background colour. Swatches first (a curated set that reads
                     well behind the white ghost), plus a native picker for a free
                     choice — the swatch is the fast path, the picker the escape
@@ -925,8 +940,8 @@ export default function CrewAvatarBuilder({
                     role="listbox"
                     aria-label={t('components.avatarBuilder.icon_background')}
                   >
-                    {ICON_BG_OPTIONS.map(colour => {
-                      const selected = !iconUntouched && iconBg.toLowerCase() === colour.toLowerCase()
+                    {ICON_BG_PALETTE.map(colour => {
+                      const selected = iconBg.toLowerCase() === colour.toLowerCase()
                       return (
                         <button
                           key={colour}
@@ -950,7 +965,7 @@ export default function CrewAvatarBuilder({
                     <span>{t('components.avatarBuilder.icon_custom_color')}</span>
                     <input
                       type="color"
-                      value={iconUntouched ? seededTraits(name).tile : iconBg}
+                      value={iconBg}
                       onChange={e => { setIconBg(e.target.value); setIconTouched(true) }}
                       className="h-7 w-10 cursor-pointer rounded border border-border bg-transparent"
                       aria-label={t('components.avatarBuilder.icon_custom_color')}
@@ -1256,7 +1271,7 @@ export default function CrewAvatarBuilder({
                 // later switch to the Icon tier starts clean rather than on a
                 // half-edited pose from before the reset.
                 setIconPose(seedIconPose(name))
-                setIconBg(seedIconBg())
+                setIconBg(seedIconBg(name))
                 // The default face has no reactions either: this link is the
                 // one control that means "everything back to the default" — and
                 // the label says both halves out loud, because a link promising
@@ -1264,8 +1279,14 @@ export default function CrewAvatarBuilder({
                 // is a control the user cannot predict.
                 setMotions({})
                 setSounds({})
-                setTier('face')
-                setPane('face')
+                // A ghost crew's Reset returns to its own face; a non-ghost
+                // crew returns to the icon tier, never the ghost trait builder
+                // — Reset must not become a path to author a new ghost on a
+                // crew that does not already wear one (issue #18616). Mirrors
+                // the on-open tier (tierOf(value)) so Reset and a fresh open
+                // land the same place.
+                setTier(wearsGhost ? 'face' : 'icon')
+                setPane(wearsGhost ? 'face' : 'icon')
               }}
               className="self-start text-[12px] text-muted underline underline-offset-2 hover:text-text"
               data-testid="avatar-builder-reset"
