@@ -120,37 +120,73 @@ class SentImageLedger:
     reply) names the same path each time, and without this record each cycle
     adds one more full-size block until the backend refuses every request.
 
-    :func:`build_prompt_blocks` reads the ledger to leave a held picture as its
-    path and note, and stages the digests it inlined. The owner of the session
-    commits the staged digests once the backend has answered that prompt, so a
-    prompt that never reached the conversation inlines its pictures again on the
-    next try, and forgets every digest when the conversation stops carrying its
-    pictures (a completed compaction, a new or reloaded session). Different
-    bytes at the same path are a different picture and are inlined.
+    :func:`build_prompt_blocks` reads the ledger, through one prompt's
+    :class:`StagedImages`, to leave a held picture as its path and note, and
+    stages the digests it inlined on that prompt's own staging. The owner of the
+    session commits a prompt's staging once the backend has answered that
+    prompt, so a prompt that never reached the conversation inlines its pictures
+    again on the next try, and forgets every digest when the conversation stops
+    carrying its pictures (a completed compaction, a native clear, a new or
+    reloaded session). Different bytes at the same path are a different picture
+    and are inlined.
     """
 
     def __init__(self) -> None:
         self._sent: set[str] = set()
-        self._staged: frozenset[str] = frozenset()
+        # Bumped by every forget, so a staging taken before it cannot commit
+        # pictures into the conversation that replaced the one it was built for.
+        self._generation = 0
 
     def holds(self, digest: str) -> bool:
         """Whether the conversation already holds the picture with *digest*."""
         return digest in self._sent
 
-    def stage(self, digests: Iterable[str]) -> None:
-        """Record the digests the prompt being built inlined, replacing any
-        staging an unanswered earlier prompt left behind."""
-        self._staged = frozenset(digests)
+    def staging(self) -> StagedImages:
+        """A fresh record for ONE prompt's inlined pictures.
 
-    def commit(self) -> None:
-        """The backend answered the staged prompt: its pictures are now held."""
-        self._sent |= self._staged
-        self._staged = frozenset()
+        Each prompt takes its own, so an abandoned build (a prompt cancelled
+        while its images were still being encoded on a worker thread) can only
+        ever write to the staging nobody will commit."""
+        return StagedImages(self, self._generation)
 
     def forget(self) -> None:
-        """The conversation has dropped its pictures: hold nothing."""
+        """The conversation has dropped its pictures: hold nothing, and let no
+        staging taken before now commit."""
         self._sent = set()
-        self._staged = frozenset()
+        self._generation += 1
+
+    def _record(self, digests: frozenset[str], generation: int) -> None:
+        if generation == self._generation:
+            self._sent |= digests
+
+
+class StagedImages:
+    """The pictures one prompt inlined, waiting for the backend's answer to that
+    prompt.
+
+    The builder reads the session's ledger through it and stages what it inlined
+    on it; only :meth:`commit`, called by the owner when the backend answers this
+    same prompt, moves them into the ledger.
+    """
+
+    def __init__(self, ledger: SentImageLedger, generation: int) -> None:
+        self._ledger = ledger
+        self._generation = generation
+        self._digests: frozenset[str] = frozenset()
+
+    def holds(self, digest: str) -> bool:
+        """Whether the session's conversation already holds *digest*."""
+        return self._ledger.holds(digest)
+
+    def stage(self, digests: Iterable[str]) -> None:
+        """Record the digests this prompt inlined."""
+        self._digests = frozenset(digests)
+
+    def commit(self) -> None:
+        """The backend answered this prompt: its pictures are now held, unless
+        the conversation was compacted or cleared since this staging was taken."""
+        self._ledger._record(self._digests, self._generation)
+        self._digests = frozenset()
 
 
 #: A marker-shaped token the USER typed, in any case. Escaped before the builder
@@ -169,7 +205,7 @@ def build_prompt_blocks(
     max_image_b64_bytes: int = MAX_IMAGE_B64_BYTES,
     max_prompt_image_blocks: int = MAX_PROMPT_IMAGE_BLOCKS,
     max_prompt_image_b64_bytes: int = MAX_PROMPT_IMAGE_B64_BYTES,
-    sent_images: SentImageLedger | None = None,
+    sent_images: StagedImages | None = None,
 ) -> list[dict]:
     """Return ACP prompt blocks for *message*.
 
@@ -185,11 +221,12 @@ def build_prompt_blocks(
     blocks or ``max_prompt_image_b64_bytes`` of base64 in one prompt, a further
     picture stays a path in the text.
 
-    *sent_images* is the session's record of the pictures its conversation
-    already holds. A picture whose bytes it holds stays a path followed by
+    *sent_images* is this prompt's own staging on the session's record of the
+    pictures its conversation already holds (:meth:`SentImageLedger.staging`).
+    A picture whose bytes the conversation holds stays a path followed by
     :data:`ALREADY_SENT_NOTE` instead of becoming a second block, and the
     digests this call inlined are staged on it for the caller to commit once the
-    backend has answered the prompt. ``None`` (a one-off prompt with no session
+    backend has answered this prompt. ``None`` (a one-off prompt with no session
     record) inlines every readable picture.
 
     ``allow_image=False`` (the agent did not advertise
