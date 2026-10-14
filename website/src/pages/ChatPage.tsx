@@ -728,11 +728,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const setToolDisclosureFor = useCallback((key: string, expanded: boolean) => {
     setToolDisclosure(prev => (prev[key] === expanded ? prev : { ...prev, [key]: expanded }))
   }, [])
-  // A tool pill the user expanded must not fold into a running turn's
-  // "N earlier steps" row under them: TurnBlock asks this, keyed exactly as the
-  // pill keys its own disclosure entry (toolDisclosureKey over messageRowKey).
-  const isTurnRowPinned = useCallback((it: TurnItem) =>
-    it.kind === 'single' && it.msg.role === 'tool' && !!toolDisclosure[toolDisclosureKey(it.msg, messageRowKey(it.msg, it.idx))],
+  // A pill the user opened may still report itself live, so a closed settled
+  // fold keeps it mounted (TurnBlock `mayBeLive`); keyed exactly as the
+  // transcript renderer keys the pill's own disclosure.
+  const turnRowMayBeLive = useCallback((it: TurnItem) =>
+    it.kind === 'single' && it.msg.role === 'tool' && toolDisclosure[toolDisclosureKey(it.msg, messageRowKey(it.msg, it.idx))] === true,
   [toolDisclosure])
   // Row keys are only unique within a slot, so carrying them across a slot
   // switch would apply one session's choices to another's turns.
@@ -6259,7 +6259,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 // wrapper too, or each quiet cycle leaves an empty spacer row.
                 if (item.kind === 'single' && isHiddenInvisibleAssistantRow(item.msg)) return null
                 if (item.kind === 'turn') {
-                  return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx}><TurnBlock turn={item} renderItem={renderTurnItem} collapseAll={chatConfig.collapseAllSteps} appToolCallIds={appToolCallIds} disclosure={turnDisclosure[vi.key]} liveDisclosure={turnDisclosure[`${vi.key}:live`]} disclosureKey={vi.key} isRowPinned={isTurnRowPinned} onDisclosureChange={setTurnDisclosureFor} /></div>
+                  return <div key={vi.key} ref={virt.measureRef(vi.index)} data-display-index={displayIdx}><TurnBlock turn={item} renderItem={renderTurnItem} collapseAll={chatConfig.collapseAllSteps} appToolCallIds={appToolCallIds} disclosure={turnDisclosure[vi.key]} disclosureKey={vi.key} onDisclosureChange={setTurnDisclosureFor} mayBeLive={turnRowMayBeLive} /></div>
                 }
                 // This row's bubble is the one the pinned banner is standing in for
                 // (identity rule below): hide the row and mark it for index.css. The
