@@ -103,6 +103,7 @@ import { useSessionRename, useSessionAutoTitle, useFolderRename } from './chat-s
 import { useSidebarLane, useLaneCycle, renderedLane } from './chat-sidebar/lanes'
 import { useHistoryPane } from './chat-sidebar/history'
 import { usePinnedSessionOrder, usePinnedOrderAuthority, usePinnedKeyboardReorder } from './chat-sidebar/pinnedOrder'
+import { useRowAnimSettled } from './chat-sidebar/rowAnimSettle'
 import { useStaleCollapse, useStaleMoveWatcher, useStaleNarrowBridge } from './chat-sidebar/stale'
 import { useFolderSort, useFolderVisibility, useFolderFilterReveal, useFolderFilterRows, useFolderMutations, useFolderTree, useRootFolderLanes } from './chat-sidebar/folders'
 import FolderCleanupPanel from './chat-sidebar/FolderCleanupPanel'
@@ -1135,8 +1136,10 @@ function ChatSidebar({
   // inside the folder block.
   const { armHold, disarm: disarmHold, instantCloseId } = useHoldPinnedHeaderOnCollapse(laneScrollRef, folders)
   // A collapse from a pinned header takes the reduced-motion path for its one
-  // commit (`instantCloseId`, see stickyCollapse.ts).
-  const rowAnimEnabled = !reduceMotion && instantCloseId === null
+  // commit (`instantCloseId`, see stickyCollapse.ts). The lane's first
+  // population takes it too, until its rows have painted (see rowAnimSettle.ts).
+  const rowAnimSettled = useRowAnimSettled(slotsLoaded && (foldersLoaded || foldersFailed) && tagColumnsSettled)
+  const rowAnimEnabled = !reduceMotion && instantCloseId === null && rowAnimSettled
   const toggleListFolderCollapse = (folder: ChatFolder, from: HTMLElement) => {
     if (folder.collapsed) disarmHold()
     else armHold(folder.id, from.closest<HTMLElement>('[data-folder-drop]'))
@@ -2566,7 +2569,7 @@ function ChatSidebar({
     // stable theming hook 'sidebar' — see website/docs/theming-contract.md
     // The region is the session picker a guide's "choose the session" step
     // points at (`sessions.list`): both layouts draw their rows inside it.
-    <div role="region" aria-label={i18nT('pages.chatSidebar.sessions')} {...uiLocation('sessions.list', sidebarRootRef)} onPointerOver={onRootPointerOver} onPointerLeave={releaseHoverPin} className={`${LIST_SHELL_CLS} flex flex-col shrink-0 relative h-full`} style={rootStyle}>
+    <div role="region" aria-label={i18nT('pages.chatSidebar.sessions')} {...uiLocation('sessions.list', sidebarRootRef)} data-row-anim={rowAnimSettled ? 'settled' : 'holding'} onPointerOver={onRootPointerOver} onPointerLeave={releaseHoverPin} className={`${LIST_SHELL_CLS} flex flex-col shrink-0 relative h-full`} style={rootStyle}>
       {/* Scroll peek: full titles in a floating, click-through layer. The
           card itself keeps `sidebarWidth`. */}
       <ScrollPeekLayer titles={peekTitles} />

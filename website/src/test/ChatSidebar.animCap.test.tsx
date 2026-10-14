@@ -12,7 +12,7 @@ import { render } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Provider } from 'react-redux'
 import { MemoryRouter } from 'react-router-dom'
-import { createTestStore } from './helpers'
+import { createTestStore, settleSidebarRowAnim } from './helpers'
 import { ThemeProvider } from '../hooks/useTheme'
 
 // Render framer-motion elements as plain DOM (jsdom can't run projection).
@@ -110,9 +110,27 @@ afterEach(() => vi.clearAllMocks())
 const rowWrappers = () => Array.from(document.querySelectorAll<HTMLElement>('[data-slot-key]'))
 
 describe('sidebar layout-projection window', () => {
-  it('enrolls only the first displacement window at every list size', () => {
+  // The first paint of a fresh lane is not movement: rows go from their
+  // content-visibility placeholder to their real height and the reads that file
+  // them land one by one. Projected, each of those commits springs the list into
+  // place and every row plays its mount slide-in, so the list collapses and
+  // re-expands as it loads. Held off until the population has painted.
+  it('holds every row out of projection and the slide-in until the first population paints', async () => {
+    renderSidebar(mkSlots(5))
+    for (const el of rowWrappers()) {
+      expect(el.getAttribute('data-layout')).toBe('false')
+      expect(el.getAttribute('data-layout-id')).toBeNull()
+    }
+    await settleSidebarRowAnim()
+    for (const el of rowWrappers()) {
+      expect(el.getAttribute('data-layout')).toBe('position')
+      expect(el.getAttribute('data-layout-id')).toMatch(/^slot-/)
+    }
+  })
+  it('enrolls only the first displacement window at every list size', async () => {
     const total = SIDEBAR_DISPLACEMENT_WINDOW + 40
     renderSidebar(mkSlots(total))
+    await settleSidebarRowAnim()
     const rows = rowWrappers()
     expect(rows.length).toBe(total)
     for (const [index, el] of rows.entries()) {
@@ -134,11 +152,12 @@ describe('sidebar layout-projection window', () => {
   // past the window, so every row in the folder lost its projection (and, in
   // production, re-rendered twice for nothing). StrictMode is the deterministic
   // way to get that repeat call in jsdom.
-  it('keeps folder rows inside the window when their block renders again', () => {
+  it('keeps folder rows inside the window when their block renders again', async () => {
     const total = SIDEBAR_DISPLACEMENT_WINDOW + 10
     const folder = { id: 'fbig', name: 'Big', order: 0, collapsed: false, created_at: 1 }
     const slots = mkSlots(total).map(s => ({ ...s, folder_id: 'fbig' }))
     renderSidebar(slots, { folders: [folder], strict: true })
+    await settleSidebarRowAnim()
     const rows = rowWrappers()
     expect(rows.length).toBe(total)
     const enrolled = rows.filter(el => /^slot-/.test(el.getAttribute('data-layout-id') ?? ''))
